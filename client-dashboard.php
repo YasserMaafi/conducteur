@@ -54,6 +54,7 @@ $requestsStmt->execute([$client_id]);
 $requests = $requestsStmt->fetchAll();
 
 // 2) Fetch active shipments
+// 2) Fetch active shipments - Updated query to include more statuses
 $activeStmt = $pdo->prepare("
     SELECT c.*,
            g1.libelle AS origin,
@@ -64,10 +65,10 @@ $activeStmt = $pdo->prepare("
              WHERE agents.agent_id = c.agent_id
             ) AS agent_name
       FROM contracts c
-      JOIN gares g1 ON c.gare_expéditrice   = g1.id_gare
+      JOIN gares g1 ON c.gare_expéditrice = g1.id_gare
       JOIN gares g2 ON c.gare_destinataire = g2.id_gare
      WHERE c.sender_client = ? 
-       AND c.status = 'in_transit'
+       AND c.status IN ('en_cours', 'in_transit', 'validé')
      LIMIT 5
 ");
 $activeStmt->execute([$client_id]);
@@ -233,7 +234,7 @@ $notifCount = $notifCountStmt->fetch()['count'];
           <a href="interface.php"     class="list-group-item list-group-item-action">
             <i class="fas fa-truck me-2"></i>Mes expéditions
           </a>
-          <a href="payments.php"      class="list-group-item list-group-item-action">
+          <a href="client-payments.php"      class="list-group-item list-group-item-action">
             <i class="fas fa-money-bill-wave me-2"></i>Paiements
           </a>
           <a href="notifications.php" class="list-group-item list-group-item-action">
@@ -300,7 +301,7 @@ $notifCount = $notifCountStmt->fetch()['count'];
             </div>
           </div>
           <div class="col-md-4">
-            <div class="card quick-action-card h-100" onclick="location.href='payments.php'">
+            <div class="card quick-action-card h-100" onclick="location.href='client-payments.php'">
               <div class="card-body text-center">
                 <div class="icon-circle bg-info text-white mb-3 mx-auto">
                   <i class="fas fa-money-bill-wave"></i>

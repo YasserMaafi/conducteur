@@ -265,7 +265,7 @@ $total_clients = $stmt->fetchColumn();
                             </a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="contracts.php">
+                            <a class="nav-link" href="agent-contracts.php">
                                 <i class="fas fa-clipboard-list me-2"></i> Tous les contrats
                             </a>
                         </li>
@@ -321,7 +321,7 @@ $total_clients = $stmt->fetchColumn();
                                 <h6 class="card-title">Contrats en attente</h6>
                                 <h2 class="mb-0"><?= $pending_contracts ?></h2>
                                 <p class="card-text mt-2 small">
-                                    <a href="contracts.php?status=draft" class="text-white">Voir tous <i class="fas fa-arrow-right ms-1"></i></a>
+                                    <a href="pending-contracts.php" class="text-white">Voir tous <i class="fas fa-arrow-right ms-1"></i></a>
                                 </p>
                             </div>
                         </div>
@@ -415,7 +415,7 @@ $total_clients = $stmt->fetchColumn();
                 <div class="card shadow-sm mb-4">
                     <div class="card-header bg-white d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="fas fa-file-alt me-2 text-warning"></i>Contrats à Compléter</h5>
-                        <a href="contracts.php?status=draft" class="btn btn-sm btn-outline-primary">Voir tous</a>
+                        <a href="pending-contracts.php" class="btn btn-sm btn-outline-primary">Voir tous</a>
                     </div>
                     <div class="card-body p-0">
                         <?php
@@ -572,7 +572,7 @@ $total_clients = $stmt->fetchColumn();
                         <?php endif; ?>
                     </div>
                     <div class="card-footer">
-                        <a href="contracts.php" class="btn btn-sm btn-outline-primary">
+                        <a href="agent-contracts.php" class="btn btn-sm btn-outline-primary">
                             Voir tous les contrats
                         </a>
                     </div>

@@ -2,6 +2,7 @@
 require_once 'includes/config.php';
 require_once 'includes/auth_functions.php';
 require_once 'includes/notification_functions.php';
+require_once 'includes/pricing_functions.php';
 
 if (!isLoggedIn() || $_SESSION['user']['role'] !== 'admin') {
     redirect('/index.php');
@@ -33,22 +34,19 @@ if (!$requestId) {
     redirect('admin-dashboard.php');
 }
 
-// Get request details with metadata from notification
+// Fetch the request
 $stmt = $pdo->prepare("
     SELECT fr.*, 
            c.company_name, c.account_code, c.client_id,
            g1.libelle AS origin, g1.code_gare AS origin_code, 
            g2.libelle AS destination, g2.code_gare AS destination_code,
-           m.description AS merchandise, m.code AS merchandise_code,
-           n.metadata
+           m.description AS merchandise, m.code AS merchandise_code
     FROM freight_requests fr
     JOIN clients c ON fr.sender_client_id = c.client_id
     JOIN gares g1 ON fr.gare_depart = g1.id_gare
     JOIN gares g2 ON fr.gare_arrivee = g2.id_gare
     LEFT JOIN merchandise m ON fr.merchandise_id = m.merchandise_id
-    LEFT JOIN notifications n ON fr.id = n.related_request_id
     WHERE fr.id = ? AND fr.status = 'client_confirmed'
-    ORDER BY n.created_at DESC
     LIMIT 1
 ");
 $stmt->execute([$requestId]);
@@ -59,11 +57,30 @@ if (!$request) {
     redirect('admin-dashboard.php');
 }
 
-// Parse metadata from notification if available
+// Fetch the notification with title 'Demande Approuvée' for this request
+$notifStmt = $pdo->prepare("
+    SELECT metadata
+    FROM notifications
+    WHERE related_request_id = ?
+      AND title = 'Demande Approuvée'
+    ORDER BY created_at DESC
+    LIMIT 1
+");
+$notifStmt->execute([$requestId]);
+$notif = $notifStmt->fetch();
 $metaData = [];
-if (!empty($request['metadata'])) {
-    $metaData = json_decode($request['metadata'], true) ?? [];
+if ($notif && !empty($notif['metadata'])) {
+    $metaData = json_decode($notif['metadata'], true) ?? [];
 }
+
+// Prefill values from metadata
+$defaultShipmentDate = $metaData['eta'] ?? date('Y-m-d', strtotime($request['date_start']));
+$defaultTrainId = $request['assigned_train_id'] ?? null;
+$defaultTrainNumber = $metaData['train_number'] ?? null;
+$defaultWagonCount = $metaData['wagon_count'] ?? ($request['wagon_count'] ?? 1);
+$defaultPrice = $metaData['price'] ?? null;
+$defaultWeight = $metaData['weight'] ?? $request['quantity'];
+$defaultCurrency = $metaData['currency'] ?? 'EUR';
 
 // Get available agents
 $stmt = $pdo->prepare("
@@ -117,14 +134,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'sender_client' => $request['sender_client_id'],
             'recipient_client' => $request['recipient_client_id'] ?? null,
             'merchandise_description' => $request['merchandise'] ?? $request['description'],
-            'shipment_weight' => $request['quantity'],
+            'shipment_weight' => $defaultWeight,
             'payment_mode' => $request['mode_paiement'],
             'shipment_date' => $_POST['shipment_date'],
             'total_port_due' => $_POST['price_quoted'],
             'wagon_count' => $_POST['wagon_count'],
             'agent_id' => $_POST['agent_id'],
+            'train_id' => $request['assigned_train_id'],
             'status' => 'draft',
-            'created_at' => date('Y-m-d H:i:s')
+            'created_at' => date('Y-m-d H:i:s'),
+            'freight_request_id' => $requestId
         ];
         
         // Insert contract
@@ -160,7 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'origin' => $request['origin'],
             'destination' => $request['destination'],
             'merchandise' => $request['merchandise'] ?? $request['description'],
-            'quantity' => $request['quantity'],
+            'quantity' => $defaultWeight,
             'price_quoted' => $_POST['price_quoted'],
             'wagon_count' => $_POST['wagon_count'],
             'transaction_type' => $_POST['transaction_type'],
@@ -190,7 +209,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Créer Projet de Contrat | SNCFT</title>
+    <title> Creation du contract | SNCFT</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -212,7 +231,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding-top: 56px;
         }
 
-        /* Admin Navigation */
         .admin-navbar {
             background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%);
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
@@ -227,7 +245,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             justify-content: center;
         }
 
-        /* Sidebar styling */
         .admin-sidebar {
             width: var(--sidebar-width);
             background: linear-gradient(180deg, #1e3a8a 0%, #1e40af 100%);
@@ -280,7 +297,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border: 3px solid rgba(255, 255, 255, 0.2);
         }
 
-        /* Main content area */
         .main-content {
             margin-left: var(--sidebar-width);
             padding: 20px;
@@ -300,7 +316,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-        /* Card styling */
         .dashboard-card {
             border: none;
             border-radius: 10px;
@@ -322,7 +337,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding: 1.25rem 1.5rem;
         }
 
-        /* Form styling */
         .form-section {
             border-left: 4px solid var(--primary-color);
             padding-left: 15px;
@@ -339,18 +353,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             color: var(--dark-color);
         }
 
-        .form-control[readonly], .form-select[readonly] {
-            background-color: var(--light-color);
-            border-color: #e9ecef;
+        .locked-field {
+            background-color: #f8f9fa;
+            cursor: not-allowed;
         }
 
-        .input-group-text {
-            background-color: var(--light-color);
-            color: var(--dark-color);
-            font-weight: 500;
-        }
-
-        /* Animation */
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
@@ -360,7 +367,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             animation: fadeIn 0.3s ease-out forwards;
         }
 
-        /* Responsive adjustments */
         @media (max-width: 768px) {
             .form-section {
                 padding-left: 10px;
@@ -372,7 +378,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <!-- Admin Navigation -->
     <nav class="navbar navbar-expand-lg navbar-dark admin-navbar fixed-top">
         <div class="container-fluid px-3">
-            <!-- Brand with sidebar toggle for mobile -->
             <div class="d-flex align-items-center">
                 <button class="btn btn-link me-2 d-lg-none text-white" id="mobileSidebarToggle">
                     <i class="fas fa-bars"></i>
@@ -382,9 +387,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 </a>
             </div>
 
-            <!-- Right side navigation items -->
             <div class="d-flex align-items-center">
-                <!-- Notification dropdown -->
                 <div class="dropdown me-3">
                     <a class="nav-link dropdown-toggle position-relative p-2" href="#" id="notifDropdown" 
                        role="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -457,7 +460,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </ul>
                 </div>
 
-                <!-- User dropdown -->
                 <div class="dropdown">
                     <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" id="userDropdown" 
                        role="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -517,15 +519,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <i class="fas fa-cog"></i> Paramètres
                 </a>
             </li>
-            <li class="nav-item">
-                <a class="nav-link active" href="#">
+            <li class="nav-item active">
+                <a class="nav-link" href="#">
                     <i class="fas fa-file-contract"></i> Créer Contrat
                 </a>
             </li>
         </ul>
     </div>
 
-    <!-- Main Content -->
+       <!-- Main Content -->
     <div class="main-content">
         <!-- Alerts -->
         <?php if (isset($_SESSION['error'])): ?>
@@ -542,7 +544,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div class="card-header">
                         <div class="d-flex justify-content-between align-items-center">
                             <div>
-                                <h4 class="mb-0"><i class="fas fa-file-contract me-2"></i>Créer Projet de Contrat</h4>
+                                <h4 class="mb-0"><i class="fas fa-file-contract me-2"></i>Créer un Contrat</h4>
                                 <p class="mb-0">Demande #<?= $requestId ?> - <?= htmlspecialchars($request['company_name']) ?></p>
                             </div>
                             <a href="admin-dashboard.php" class="btn btn-outline-light">
@@ -585,16 +587,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         <label class="form-label">Type de Transaction <span class="text-danger">*</span></label>
                                         <select name="transaction_type" class="form-select" required>
                                             <option value="">Sélectionner...</option>
-                                            <option value="export" <?= isset($_POST['transaction_type']) && $_POST['transaction_type'] === 'export' ? 'selected' : '' ?>>Exportation</option>
-                                            <option value="import" <?= isset($_POST['transaction_type']) && $_POST['transaction_type'] === 'import' ? 'selected' : '' ?>>Importation</option>
-                                            <option value="national" <?= isset($_POST['transaction_type']) && $_POST['transaction_type'] === 'national' ? 'selected' : '' ?>>Transport National</option>
-                                            <option value="transit" <?= isset($_POST['transaction_type']) && $_POST['transaction_type'] === 'transit' ? 'selected' : '' ?>>Transit</option>
+                                            <option value="export">Exportation</option>
+                                            <option value="import">Importation</option>
+                                            <option value="national" selected>Transport National</option>
+                                            <option value="transit">Transit</option>
                                         </select>
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label">Date d'Expédition <span class="text-danger">*</span></label>
-                                        <input type="date" name="shipment_date" class="form-control" 
-                                               value="<?= isset($_POST['shipment_date']) ? htmlspecialchars($_POST['shipment_date']) : date('Y-m-d', strtotime($request['date_start'])) ?>" required>
+                                        <input type="date" name="shipment_date" class="form-control" value="<?= htmlspecialchars($defaultShipmentDate) ?>" required>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label">Train Assigné</label>
+                                        <div class="input-group">
+                                            <?php if ($defaultTrainId): ?>
+                                                <span class="input-group-text">ID: <?= htmlspecialchars($defaultTrainId) ?></span>
+                                            <?php endif; ?>
+                                            <input type="text" class="form-control" value="<?= htmlspecialchars($defaultTrainNumber ?? 'Non assigné') ?>" readonly>
+                                        </div>
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label">Mode de Paiement</label>
@@ -630,18 +640,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             <?php if ($request['merchandise_code']): ?>
                                                 <span class="input-group-text"><?= htmlspecialchars($request['merchandise_code']) ?></span>
                                             <?php endif; ?>
-                                            <input type="text" class="form-control" 
-                                                value="<?= htmlspecialchars($request['merchandise'] ?? $request['description']) ?>" readonly>
+                                            <input type="text" class="form-control" value="<?= htmlspecialchars($request['merchandise'] ?? $request['description']) ?>" readonly>
                                         </div>
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label">Poids (kg)</label>
-                                        <input type="number" class="form-control" value="<?= $request['quantity'] ?>" readonly>
+                                        <input type="number" class="form-control" value="<?= htmlspecialchars($defaultWeight) ?>" readonly>
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label">Nombre de Wagons <span class="text-danger">*</span></label>
-                                        <input type="number" name="wagon_count" class="form-control" 
-                                            value="<?= isset($_POST['wagon_count']) ? htmlspecialchars($_POST['wagon_count']) : ($metaData['wagon_count'] ?? 1) ?>" min="1" required>
+                                        <input type="number" name="wagon_count" class="form-control" value="<?= htmlspecialchars($defaultWagonCount) ?>" min="1" required>
                                     </div>
                                 </div>
                             </div>
@@ -652,15 +660,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <div class="row mb-3">
                                     <div class="col-md-6">
                                         <label class="form-label">Prix Proposé (€) <span class="text-danger">*</span></label>
-                                        <input type="number" name="price_quoted" class="form-control" 
-                                            value="<?= isset($_POST['price_quoted']) ? htmlspecialchars($_POST['price_quoted']) : ($metaData['price'] ?? '') ?>" step="0.01" min="0" required>
+                                        <input type="number" name="price_quoted" class="form-control" value="<?= htmlspecialchars($defaultPrice) ?>" step="0.01" min="0" required>
                                     </div>
                                     <div class="col-md-6">
                                         <label class="form-label">Devise</label>
                                         <select name="currency" class="form-select">
-                                            <option value="EUR" selected>Euro (€)</option>
-                                            <option value="USD">Dollar US ($)</option>
-                                            <option value="TND">Dinar Tunisien (DT)</option>
+                                            <option value="EUR" <?= $defaultCurrency === 'EUR' ? 'selected' : '' ?>>Euro (€)</option>
+                                            <option value="USD" <?= $defaultCurrency === 'USD' ? 'selected' : '' ?>>Dollar US ($)</option>
+                                            <option value="TND" <?= $defaultCurrency === 'TND' ? 'selected' : '' ?>>Dinar Tunisien (DT)</option>
                                         </select>
                                     </div>
                                 </div>

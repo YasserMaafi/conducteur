@@ -28,24 +28,14 @@ $stmt = $pdo->prepare("
            g2.libelle AS destination, g2.code_gare AS destination_code,
            m.description AS merchandise_type, m.code AS merchandise_code,
            c.merchandise_description AS request_description,
-           fr.id AS freight_request_id, fr.recipient_name, fr.recipient_contact,
+           fr.recipient_name, fr.recipient_contact,
            a.username AS admin_username
     FROM contracts c
     JOIN clients cl ON c.sender_client = cl.client_id
     JOIN gares g1 ON c.gare_expéditrice = g1.id_gare
     JOIN gares g2 ON c.gare_destinataire = g2.id_gare
     LEFT JOIN merchandise m ON c.merchandise_description = m.description
-    LEFT JOIN freight_requests fr ON fr.sender_client_id = cl.client_id 
-        AND fr.status = 'client_confirmed'
-        AND fr.id = (
-            SELECT n.related_request_id 
-            FROM notifications n
-            WHERE n.related_request_id IS NOT NULL 
-            AND n.type = 'contract_draft'
-            AND n.user_id = c.draft_created_by
-            ORDER BY n.created_at DESC 
-            LIMIT 1
-        )
+    LEFT JOIN freight_requests fr ON fr.id = c.freight_request_id
     LEFT JOIN users a ON a.user_id = c.draft_created_by
     WHERE c.contract_id = ? AND c.agent_id = ? AND c.status = 'draft'
 ");
@@ -58,88 +48,115 @@ if (!$contract) {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    try {
-        $pdo->beginTransaction();
-        
-        // Validate required fields
-        $required = [
-            'shipment_weight' => 'Poids de l\'expédition',
-            'wagon_count' => 'Nombre de wagons',
-            'tarp_count' => 'Nombre de bâches',
-            'total_units' => 'Nombre total d\'unités'
-        ];
-        
-        foreach ($required as $field => $name) {
-            if (empty($_POST[$field])) {
-                throw new Exception("Le champ '$name' est requis");
-            }
+try {
+    $pdo->beginTransaction();
+    
+    // Validate required fields
+    $required = [
+        'shipment_weight' => 'Poids de l\'expédition',
+        'wagon_count' => 'Nombre de wagons',
+        'tarp_count' => 'Nombre de bâches',
+        'total_units' => 'Nombre total d\'unités'
+    ];
+    
+    foreach ($required as $field => $name) {
+        if (empty($_POST[$field])) {
+            throw new Exception("Le champ '$name' est requis");
         }
-
-        // Update contract with additional details
-        $update_data = [
-            'shipment_weight' => $_POST['shipment_weight'],
-            'wagon_count' => $_POST['wagon_count'],
-            'tarp_count' => $_POST['tarp_count'],
-            'total_units' => $_POST['total_units'],
-            'accessories' => $_POST['accessories'] ?? null,
-            'expenses' => $_POST['expenses'] ?? null,
-            'reimbursement' => $_POST['reimbursement'] ?? null,
-            'paid_port' => $_POST['paid_port'] ?? null,
-            'total_port_due' => $_POST['total_port_due'] ?? null,
-            'analytical_allocation' => $_POST['analytical_allocation'] ?? null,
-            'part_sncf' => $_POST['part_sncf'] ?? null,
-            'part_oncf' => $_POST['part_oncf'] ?? null,
-            'status' => 'terminé',
-            'updated_at' => date('Y-m-d H:i:s')
-        ];
-        
-        $set_clause = implode(', ', array_map(fn($field) => "$field = ?", array_keys($update_data)));
-        
-        // Update contract
-        $stmt = $pdo->prepare("
-            UPDATE contracts 
-            SET $set_clause
-            WHERE contract_id = ?
-        ");
-        $stmt->execute([...array_values($update_data), $contract_id]);
-        
-        // Update freight request status to 'contract_created' if we found a related request
-        if (!empty($contract['freight_request_id'])) {
-            $stmt = $pdo->prepare("
-                UPDATE freight_requests 
-                SET status = 'contract_created', updated_at = NOW() 
-                WHERE id = ?
-            ");
-            $stmt->execute([$contract['freight_request_id']]);
-        }
-        
-        // Send notification to admin
-        $admin_id = $pdo->query("SELECT user_id FROM admins LIMIT 1")->fetchColumn();
-        
-        if ($admin_id) {
-            $notificationData = [
-                'contract_id' => $contract_id,
-                'freight_request_id' => $contract['freight_request_id'] ?? null,
-                'status' => 'terminé'
-            ];
-            
-            createNotification(
-                $admin_id,
-                'contract_completed',
-                'Contrat Complété',
-                "Le contrat #$contract_id a été complété par l'agent " . $_SESSION['user']['username'],
-                $contract_id,
-                $notificationData
-            );
-        }
-        
-        $pdo->commit();
-        $_SESSION['success'] = "Contrat #$contract_id complété avec succès";
-        redirect('agent-dashboard.php');
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        $_SESSION['error'] = "Erreur: " . $e->getMessage();
     }
+
+    // Update contract with additional details
+    $update_data = [
+        'shipment_weight' => $_POST['shipment_weight'],
+        'wagon_count' => $_POST['wagon_count'],
+        'tarp_count' => $_POST['tarp_count'],
+        'total_units' => $_POST['total_units'],
+        'accessories' => $_POST['accessories'] ?? null,
+        'expenses' => $_POST['expenses'] ?? null,
+        'reimbursement' => $_POST['reimbursement'] ?? null,
+        'paid_port' => $_POST['paid_port'] ?? null,
+        'total_port_due' => $_POST['total_port_due'] ?? null,
+        'analytical_allocation' => $_POST['analytical_allocation'] ?? null,
+        'part_sncf' => $_POST['part_sncf'] ?? null,
+        'part_oncf' => $_POST['part_oncf'] ?? null,
+        'status' => 'validé',
+        'updated_at' => date('Y-m-d H:i:s')
+    ];
+    
+    $set_clause = implode(', ', array_map(fn($field) => "$field = ?", array_keys($update_data)));
+    
+    // Update contract
+    $stmt = $pdo->prepare("
+        UPDATE contracts 
+        SET $set_clause
+        WHERE contract_id = ?
+    ");
+    $stmt->execute([...array_values($update_data), $contract_id]);
+    
+    // Update freight request status to 'contract_completed' if we have a freight_request_id
+    if ($contract['freight_request_id']) {
+        $stmt = $pdo->prepare("
+            UPDATE freight_requests 
+            SET status = 'contract_completed', updated_at = NOW() 
+            WHERE id = ?
+        ");
+        $stmt->execute([$contract['freight_request_id']]);
+    }
+    
+    // Send notification to admin
+    $admin_id = $pdo->query("SELECT user_id FROM admins LIMIT 1")->fetchColumn();
+    
+    if ($admin_id) {
+        $notificationData = [
+            'contract_id' => $contract_id,
+            'freight_request_id' => $contract['freight_request_id'] ?? null,
+            'status' => 'terminé'
+        ];
+        
+        createNotification(
+            $admin_id,
+            'contract_completed',
+            'Contrat Complété',
+            "Le contrat #$contract_id a été complété par l'agent " . $_SESSION['user']['username'],
+            $contract_id,
+            $notificationData
+        );
+    }
+
+    // Send notification to the client
+    $stmt = $pdo->prepare("
+        SELECT u.user_id 
+        FROM users u 
+        JOIN clients c ON u.user_id = c.user_id 
+        WHERE c.client_id = ?
+    ");
+    $stmt->execute([$contract['sender_client']]);
+    $client_user_id = $stmt->fetchColumn();
+
+    if ($client_user_id) {
+        $notificationData = [
+            'contract_id' => $contract_id,
+            'link' => "contracts.php?highlight=" . $contract_id,
+            'status' => 'terminé'
+        ];
+        
+        createNotification(
+            $client_user_id,
+            'contract_completed',
+            'Contrat Finalisé',
+            "Votre contrat #$contract_id a été finalisé et complété par notre agent.",
+            $contract_id,
+            $notificationData
+        );
+    }
+    
+    $pdo->commit();
+    $_SESSION['success'] = "Contrat #$contract_id complété avec succès";
+    redirect('agent-dashboard.php');
+} catch (Exception $e) {
+    $pdo->rollBack();
+    $_SESSION['error'] = "Erreur: " . $e->getMessage();
+}
 }
 ?>
 
@@ -313,7 +330,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     <div class="col-md-4">
                                         <label class="form-label">Poids Final de l'Expédition (kg) <span class="text-danger">*</span></label>
                                         <input type="number" name="shipment_weight" class="form-control" 
-                                            value="<?= htmlspecialchars($contract['shipment_weight']) ?>" required>
+                                            value="<?= htmlspecialchars($contract['shipment_weight']) ?>" >
                                     </div>
                                     <div class="col-md-4">
                                         <label class="form-label">Nombre Final de Wagons <span class="text-danger">*</span></label>
@@ -384,6 +401,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             value="<?= htmlspecialchars($contract['analytical_allocation'] ?? '') ?>">
                                     </div>
                                 </div>
+                                <div class="mb-3">
+    <label class="form-label">Client Signature</label>
+    <div id="signature-pad" style="border:1px solid #ddd; height:150px; background:#fff">
+        <!-- Signature pad will render here -->
+    </div>
+    <button type="button" id="clear-signature" class="btn btn-sm btn-outline-secondary mt-2">
+        <i class="fas fa-eraser"></i> Clear
+    </button>
+    <input type="hidden" name="signature_data" id="signature-data">
+</div>
                             </div>
                             
                             <div class="d-grid gap-2 mt-4">
@@ -422,5 +449,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             return valid;
         });
     </script>
+    <script>
+    const canvas = document.getElementById("signature-pad");
+    const signaturePad = new SignaturePad(canvas);
+    
+    document.getElementById("clear-signature").addEventListener("click", () => {
+        signaturePad.clear();
+    });
+    
+    document.querySelector("form").addEventListener("submit", () => {
+        document.getElementById("signature-data").value = signaturePad.isEmpty() 
+            ? "" 
+            : signaturePad.toDataURL();
+    });
+</script>
 </body>
 </html>

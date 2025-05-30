@@ -7,7 +7,7 @@ define('DB_HOST', 'localhost');
 define('DB_USER', 'postgres');
 define('DB_PASS', '123');
 define('DB_NAME', 'fretdb');
-
+ 
 // Connexion à la base de données avec PDO pour PostgreSQL
 try {
     $pdo = new PDO("pgsql:host=" . DB_HOST . ";dbname=" . DB_NAME, DB_USER, DB_PASS);
@@ -22,4 +22,4 @@ function redirect($url) {
     header("Location: $url");
     exit();
 }
-?>
+?> 

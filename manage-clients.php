@@ -27,6 +27,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_client'])) {
         $client = $stmt->fetch();
         
         if ($client) {
+            // Delete client's tariffs first
+            $stmt = $pdo->prepare("DELETE FROM tariffs WHERE client_id = ?");
+            $stmt->execute([$client_id]);
+            
             // Delete from clients table
             $stmt = $pdo->prepare("DELETE FROM clients WHERE client_id = ?");
             $stmt->execute([$client_id]);
@@ -55,18 +59,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_client'])) {
     $company_name = filter_input(INPUT_POST, 'company_name', FILTER_SANITIZE_STRING);
     $phone_number = filter_input(INPUT_POST, 'phone_number', FILTER_SANITIZE_STRING);
     $account_code = filter_input(INPUT_POST, 'account_code', FILTER_SANITIZE_STRING);
-    $tarifs = filter_input(INPUT_POST, 'tarifs', FILTER_SANITIZE_STRING);
     $adresse = filter_input(INPUT_POST, 'adresse', FILTER_SANITIZE_STRING);
     
     try {
         $stmt = $pdo->prepare("
             UPDATE clients 
-            SET company_name = ?, phone_number = ?, account_code = ?, tarifs = ?, adresse = ?, updated_at = NOW()
+            SET company_name = ?, phone_number = ?, account_code = ?, adresse = ?, updated_at = NOW()
             WHERE client_id = ?
         ");
-        $stmt->execute([$company_name, $phone_number, $account_code, $tarifs, $adresse, $client_id]);
+        $stmt->execute([$company_name, $phone_number, $account_code, $adresse, $client_id]);
         
         $_SESSION['success'] = "Client mis à jour avec succès";
+    } catch (Exception $e) {
+        $_SESSION['error'] = "Erreur: " . $e->getMessage();
+    }
+    
+    header("Location: manage-clients.php");
+    exit();
+}
+
+// Handle tariff updates
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_tariff'])) {
+    $client_id = filter_input(INPUT_POST, 'client_id', FILTER_VALIDATE_INT);
+    $base_rate_per_km = filter_input(INPUT_POST, 'base_rate_per_km', FILTER_VALIDATE_FLOAT);
+    
+    try {
+        // Check if tariff exists
+        $stmt = $pdo->prepare("SELECT tariff_id FROM tariffs WHERE client_id = ?");
+        $stmt->execute([$client_id]);
+        $tariff_exists = $stmt->fetch();
+        
+        if ($tariff_exists) {
+            // Update existing tariff
+            $stmt = $pdo->prepare("UPDATE tariffs SET base_rate_per_km = ? WHERE client_id = ?");
+            $stmt->execute([$base_rate_per_km, $client_id]);
+        } else {
+            // Insert new tariff
+            $stmt = $pdo->prepare("INSERT INTO tariffs (client_id, base_rate_per_km) VALUES (?, ?)");
+            $stmt->execute([$client_id, $base_rate_per_km]);
+        }
+        
+        $_SESSION['success'] = "Tarif mis à jour avec succès";
     } catch (Exception $e) {
         $_SESSION['error'] = "Erreur: " . $e->getMessage();
     }
@@ -83,8 +116,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_client'])) {
     $company_name = filter_input(INPUT_POST, 'company_name', FILTER_SANITIZE_STRING);
     $phone_number = filter_input(INPUT_POST, 'phone_number', FILTER_SANITIZE_STRING);
     $account_code = filter_input(INPUT_POST, 'account_code', FILTER_SANITIZE_STRING);
-    $tarifs = filter_input(INPUT_POST, 'tarifs', FILTER_SANITIZE_STRING);
     $adresse = filter_input(INPUT_POST, 'adresse', FILTER_SANITIZE_STRING);
+    $base_rate_per_km = filter_input(INPUT_POST, 'base_rate_per_km', FILTER_VALIDATE_FLOAT);
     
     try {
         $pdo->beginTransaction();
@@ -100,10 +133,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_client'])) {
         // Then create client
         $stmt = $pdo->prepare("
             INSERT INTO clients 
-            (user_id, company_name, phone_number, account_code, tarifs, adresse, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, NOW())
+            (user_id, company_name, phone_number, account_code, adresse, created_at) 
+            VALUES (?, ?, ?, ?, ?, NOW())
         ");
-        $stmt->execute([$user_id, $company_name, $phone_number, $account_code, $tarifs, $adresse]);
+        $stmt->execute([$user_id, $company_name, $phone_number, $account_code, $adresse]);
+        $client_id = $pdo->lastInsertId();
+        
+        // Add tariff if provided
+        if ($base_rate_per_km !== false) {
+            $stmt = $pdo->prepare("
+                INSERT INTO tariffs (client_id, base_rate_per_km) 
+                VALUES (?, ?)
+            ");
+            $stmt->execute([$client_id, $base_rate_per_km]);
+        }
         
         $pdo->commit();
         $_SESSION['success'] = "Nouveau client créé avec succès";
@@ -118,16 +161,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_client'])) {
 
 // Get filter parameters
 $search = isset($_GET['search']) ? $_GET['search'] : '';
-$sort = isset($_GET['sort']) ? $_GET['sort'] : 'created_at';
+$sort = isset($_GET['sort']) ? $_GET['sort'] : 'user_created_at'; // Changed default to user_created_at
 $order = isset($_GET['order']) && in_array(strtoupper($_GET['order']), ['ASC', 'DESC']) 
     ? strtoupper($_GET['order']) 
     : 'DESC';
 
-// Build base query
+// Build base query with tariff information
 $query = "
-    SELECT c.*, u.email, u.created_at as user_created_at 
+    SELECT c.*, u.email, u.created_at as user_created_at, t.base_rate_per_km
     FROM clients c
     JOIN users u ON c.user_id = u.user_id
+    LEFT JOIN tariffs t ON c.client_id = t.client_id
     WHERE u.role = 'client'
 ";
 
@@ -139,10 +183,21 @@ if (!empty($search)) {
     $params = array_merge($params, [$searchTerm, $searchTerm, $searchTerm]);
 }
 
-// Add sorting
-$query .= " ORDER BY $sort $order";
+// Add sorting - specify exact table for created_at
+switch ($sort) {
+    case 'company_name':
+        $query .= " ORDER BY c.company_name $order";
+        break;
+    case 'base_rate_per_km':
+        $query .= " ORDER BY t.base_rate_per_km $order";
+        break;
+    case 'user_created_at':
+    default:
+        $query .= " ORDER BY u.created_at $order";
+        break;
+}
 
-// Get all clients
+// Get all clients with their tariffs
 $stmt = $pdo->prepare($query);
 $stmt->execute($params);
 $clients = $stmt->fetchAll();
@@ -167,7 +222,7 @@ $notifications = $notifications->fetchAll();
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         <?php require_once 'assets/css/style.css'; ?>
-        /* Reuse all styles from admin-dashboard.php */
+        /* All CSS from admin-dashboard.php */
         :root {
             --primary-color: #0d6efd;
             --secondary-color: #6c757d;
@@ -180,10 +235,9 @@ $notifications = $notifications->fetchAll();
             --sidebar-width: 280px;
         }
 
-        /* All other CSS from admin-dashboard.php */
-        /* ... (include all the CSS from your admin-dashboard.php here) ... */
+        /* ... (include all other CSS from admin-dashboard.php) ... */
 
-        /* Additional specific styles for this page */
+        /* Additional styles for this page */
         .client-actions {
             white-space: nowrap;
         }
@@ -212,8 +266,13 @@ $notifications = $notifications->fetchAll();
             color: var(--primary-color);
             font-weight: bold;
         }
+        
+        .tariff-badge {
+            font-size: 0.85rem;
+            padding: 0.35em 0.65em;
+        }
     </style>
-    <style>
+        <style>
         <?php require_once 'assets/css/style.css'; ?>
 
         :root {
@@ -481,7 +540,6 @@ $notifications = $notifications->fetchAll();
     <!-- Admin Navigation - Same as admin-dashboard.php -->
     <nav class="navbar navbar-expand-lg navbar-dark admin-navbar fixed-top">
         <div class="container-fluid px-3">
-            <!-- Brand with sidebar toggle for mobile -->
             <div class="d-flex align-items-center">
                 <button class="btn btn-link me-2 d-lg-none text-white" id="mobileSidebarToggle">
                     <i class="fas fa-bars"></i>
@@ -491,7 +549,6 @@ $notifications = $notifications->fetchAll();
                 </a>
             </div>
 
-            <!-- Right side navigation items -->
             <div class="d-flex align-items-center">
                 <!-- Notification dropdown -->
                 <div class="dropdown me-3">
@@ -501,7 +558,6 @@ $notifications = $notifications->fetchAll();
                         <?php if (count($notifications) > 0): ?>
                             <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
                                 <?= count($notifications) ?>
-                                <span class="visually-hidden">unread notifications</span>
                             </span>
                         <?php endif; ?>
                     </a>
@@ -518,16 +574,10 @@ $notifications = $notifications->fetchAll();
                         <?php else: ?>
                             <div style="max-height: 400px; overflow-y: auto;">
                                 <?php foreach ($notifications as $notif): ?>
-                                    <?php
-                                        // Notification processing same as admin-dashboard.php
-                                        // ... (include the same notification dropdown code from admin-dashboard.php) ...
-                                    ?>
+                                    <!-- Notification items same as admin-dashboard.php -->
                                 <?php endforeach; ?>
                             </div>
                         <?php endif; ?>
-                        <li class="dropdown-footer bg-light py-2 px-3 text-center border-top">
-                            <small class="text-muted"><?= count($notifications) ?> notification(s) non lue(s)</small>
-                        </li>
                     </ul>
                 </div>
 
@@ -642,7 +692,7 @@ $notifications = $notifications->fetchAll();
                             <select class="form-select" name="sort" onchange="this.form.submit()">
                                 <option value="company_name" <?= $sort === 'company_name' ? 'selected' : '' ?>>Nom</option>
                                 <option value="user_created_at" <?= $sort === 'user_created_at' ? 'selected' : '' ?>>Date de création</option>
-                                <option value="tarifs" <?= $sort === 'tarifs' ? 'selected' : '' ?>>Tarifs</option>
+                                <option value="base_rate_per_km" <?= $sort === 'base_rate_per_km' ? 'selected' : '' ?>>Tarif</option>
                             </select>
                             <select class="form-select" name="order" onchange="this.form.submit()">
                                 <option value="ASC" <?= $order === 'ASC' ? 'selected' : '' ?>>Croissant</option>
@@ -682,10 +732,10 @@ $notifications = $notifications->fetchAll();
                                     <th>Email</th>
                                     <th>Téléphone</th>
                                     <th>Code Compte</th>
-                                    <th class="sortable-header <?= $sort === 'tarifs' ? 'active-sort' : '' ?>">
-                                        <a href="?search=<?= urlencode($search) ?>&sort=tarifs&order=<?= $sort === 'tarifs' && $order === 'ASC' ? 'DESC' : 'ASC' ?>">
-                                            Tarifs
-                                            <?php if ($sort === 'tarifs'): ?>
+                                    <th class="sortable-header <?= $sort === 'base_rate_per_km' ? 'active-sort' : '' ?>">
+                                        <a href="?search=<?= urlencode($search) ?>&sort=base_rate_per_km&order=<?= $sort === 'base_rate_per_km' && $order === 'ASC' ? 'DESC' : 'ASC' ?>">
+                                            Tarif (€/km)
+                                            <?php if ($sort === 'base_rate_per_km'): ?>
                                                 <i class="fas fa-sort-<?= $order === 'ASC' ? 'up' : 'down' ?> ms-1"></i>
                                             <?php endif; ?>
                                         </a>
@@ -722,7 +772,15 @@ $notifications = $notifications->fetchAll();
                                                 <span class="text-muted">N/A</span>
                                             <?php endif; ?>
                                         </td>
-                                        <td><?= htmlspecialchars($client['tarifs']) ?></td>
+                                        <td>
+                                            <?php if (!empty($client['base_rate_per_km'])): ?>
+                                                <span class="badge bg-success tariff-badge">
+                                                    <?= number_format($client['base_rate_per_km'], 2) ?> €/km
+                                                </span>
+                                            <?php else: ?>
+                                                <span class="badge bg-warning tariff-badge">Non défini</span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td>
                                             <small><?= nl2br(htmlspecialchars($client['adresse'])) ?></small>
                                         </td>
@@ -733,6 +791,12 @@ $notifications = $notifications->fetchAll();
                                                     data-bs-target="#editClientModal<?= $client['client_id'] ?>"
                                                     title="Modifier">
                                                 <i class="fas fa-edit"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-info me-1" 
+                                                    data-bs-toggle="modal" 
+                                                    data-bs-target="#editTariffModal<?= $client['client_id'] ?>"
+                                                    title="Modifier tarif">
+                                                <i class="fas fa-euro-sign"></i>
                                             </button>
                                             <form method="POST" class="d-inline" onsubmit="return confirm('Êtes-vous sûr de vouloir supprimer ce client?');">
                                                 <input type="hidden" name="client_id" value="<?= $client['client_id'] ?>">
@@ -757,7 +821,7 @@ $notifications = $notifications->fetchAll();
                                                     </div>
                                                     <div class="modal-body">
                                                         <div class="mb-3">
-                                                            <label class="form-label">Nom Société</label>
+                                                            <label class="form-label">Nom Société <span class="text-danger">*</span></label>
                                                             <input type="text" class="form-control" name="company_name" 
                                                                    value="<?= htmlspecialchars($client['company_name']) ?>" required>
                                                         </div>
@@ -772,11 +836,6 @@ $notifications = $notifications->fetchAll();
                                                                    value="<?= htmlspecialchars($client['account_code']) ?>">
                                                         </div>
                                                         <div class="mb-3">
-                                                            <label class="form-label">Tarifs</label>
-                                                            <input type="text" class="form-control" name="tarifs" 
-                                                                   value="<?= htmlspecialchars($client['tarifs']) ?>">
-                                                        </div>
-                                                        <div class="mb-3">
                                                             <label class="form-label">Adresse</label>
                                                             <textarea class="form-control" name="adresse" rows="3"><?= 
                                                                 htmlspecialchars($client['adresse']) ?></textarea>
@@ -788,6 +847,43 @@ $notifications = $notifications->fetchAll();
                                                         </button>
                                                         <button type="submit" name="update_client" class="btn btn-primary">
                                                             <i class="fas fa-save me-1"></i>Enregistrer
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Edit Tariff Modal -->
+                                    <div class="modal fade" id="editTariffModal<?= $client['client_id'] ?>" tabindex="-1">
+                                        <div class="modal-dialog">
+                                            <div class="modal-content">
+                                                <form method="POST">
+                                                    <input type="hidden" name="client_id" value="<?= $client['client_id'] ?>">
+                                                    <div class="modal-header bg-info text-white">
+                                                        <h5 class="modal-title">
+                                                            <i class="fas fa-euro-sign me-2"></i>Tarif pour <?= htmlspecialchars($client['company_name']) ?>
+                                                        </h5>
+                                                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                                                    </div>
+                                                    <div class="modal-body">
+                                                        <div class="alert alert-info">
+                                                            <i class="fas fa-info-circle me-2"></i>
+                                                            Ce tarif sera utilisé pour calculer les prix des demandes de fret.
+                                                        </div>
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Tarif de base (€/km) <span class="text-danger">*</span></label>
+                                                            <input type="number" class="form-control" name="base_rate_per_km" 
+                                                                   value="<?= $client['base_rate_per_km'] ?? '' ?>" step="0.01" min="0" required>
+                                                            <small class="text-muted">Prix par kilomètre pour le transport</small>
+                                                        </div>
+                                                    </div>
+                                                    <div class="modal-footer">
+                                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                                                            <i class="fas fa-times me-1"></i>Annuler
+                                                        </button>
+                                                        <button type="submit" name="update_tariff" class="btn btn-info text-white">
+                                                            <i class="fas fa-save me-1"></i>Enregistrer Tarif
                                                         </button>
                                                     </div>
                                                 </form>
@@ -840,12 +936,13 @@ $notifications = $notifications->fetchAll();
                             <input type="text" class="form-control" name="account_code">
                         </div>
                         <div class="mb-3">
-                            <label class="form-label">Tarifs</label>
-                            <input type="text" class="form-control" name="tarifs">
-                        </div>
-                        <div class="mb-3">
                             <label class="form-label">Adresse</label>
                             <textarea class="form-control" name="adresse" rows="3"></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Tarif de base (€/km)</label>
+                            <input type="number" class="form-control" name="base_rate_per_km" step="0.01" min="0">
+                            <small class="text-muted">Peut être défini plus tard</small>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -863,7 +960,7 @@ $notifications = $notifications->fetchAll();
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Toggle sidebar on mobile (same as admin-dashboard)
+        // Toggle sidebar on mobile
         document.getElementById('mobileSidebarToggle').addEventListener('click', function() {
             document.querySelector('.admin-sidebar').classList.toggle('show');
         });

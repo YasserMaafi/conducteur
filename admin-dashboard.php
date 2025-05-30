@@ -1,6 +1,75 @@
 <?php
 require_once 'includes/config.php';
 require_once 'includes/auth_functions.php';
+require_once 'includes/pricing_functions.php';
+
+// Functions to check train and wagon availability
+function getAvailableTrains($pdo, $date_start) {
+    $stmt = $pdo->prepare("
+        SELECT t.train_id, t.train_number, t.status
+        FROM trains t
+        WHERE t.status = 'available'
+        AND (t.next_available_date IS NULL OR t.next_available_date <= ?)
+        AND NOT EXISTS (
+            SELECT 1 FROM expeditions e 
+            WHERE e.train_id = t.train_id 
+            AND e.status IN ('pending', 'in_progress')
+        )
+        ORDER BY t.train_number
+    ");
+    $stmt->execute([$date_start]);
+    return $stmt->fetchAll();
+}
+
+function getAvailableWagons($pdo, $date_start, $count_needed) {
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*) as available_count
+        FROM wagons w
+        WHERE w.status = 'available'
+        AND NOT EXISTS (
+            SELECT 1 FROM wagon_assignments wa
+            WHERE wa.wagon_id = w.wagon_id
+            AND wa.status = 'assigned'
+            AND wa.assigned_date = ?
+        )
+    ");
+    $stmt->execute([$date_start]);
+    $result = $stmt->fetch();
+    return $result['available_count'] >= $count_needed;
+}
+
+function assignWagonsToTrain($pdo, $train_id, $count_needed, $date) {
+    $stmt = $pdo->prepare("
+        SELECT w.wagon_id, w.wagon_number
+        FROM wagons w
+        WHERE w.status = 'available'
+        AND NOT EXISTS (
+            SELECT 1 FROM wagon_assignments wa
+            WHERE wa.wagon_id = w.wagon_id
+            AND wa.status = 'assigned'
+            AND wa.assigned_date = ?
+        )
+        LIMIT ?
+    ");
+    $stmt->execute([$date, $count_needed]);
+    $wagons = $stmt->fetchAll();
+    
+    if (count($wagons) < $count_needed) {
+        return false;
+    }
+    
+    // Assign wagons
+    $stmt = $pdo->prepare("
+        INSERT INTO wagon_assignments (wagon_id, train_id, assigned_date, status)
+        VALUES (?, ?, ?, 'assigned')
+    ");
+    
+    foreach ($wagons as $wagon) {
+        $stmt->execute([$wagon['wagon_id'], $train_id, $date]);
+    }
+    
+    return array_column($wagons, 'wagon_id');
+}
 
 // Verify admin role
 if (!isLoggedIn() || $_SESSION['user']['role'] !== 'admin') {
@@ -49,32 +118,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
 
         if ($action === 'approve') {
-            $new_status = 'accepted';
-            $stmt = $pdo->prepare("UPDATE freight_requests SET status = ?, admin_notes = ? WHERE id = ?");
-            $stmt->execute([$new_status, $notes, $request_id]);
+            // Validate train selection and wagon availability
+            if (empty($_POST['train_id'])) {
+                throw new Exception("Veuillez sélectionner un train.");
+            }
             
-            // Prefill contract draft
-            $contract_data = [
-                'gare_expéditrice' => $request['gare_depart'],
-                'gare_destinataire' => $request['gare_arrivee'],
-                'sender_client' => $request['sender_client_id'],
-                'merchandise_description' => $request['merchandise'] ?? $request['description'],
-                'quantity' => $request['quantity'],
-                'wagon_count' => $_POST['wagon_count'],
-                'payment_mode' => $request['mode_paiement'],
-                'price_quoted' => $_POST['price'],
-                'estimated_arrival' => $_POST['eta']
-            ];
-            $_SESSION['contract_draft_' . $request_id] = $contract_data;
+            $train_id = filter_input(INPUT_POST, 'train_id', FILTER_VALIDATE_INT);
+            $wagon_count = filter_input(INPUT_POST, 'wagon_count', FILTER_VALIDATE_INT);
+            
+            // Verify train is still available
+            $available_trains = getAvailableTrains($pdo, $request['date_start']);
+            $train_available = false;
+            foreach ($available_trains as $train) {
+                if ($train['train_id'] == $train_id) {
+                    $train_available = true;
+                    break;
+                }
+            }
+            if (!$train_available) {
+                throw new Exception("Le train sélectionné n'est plus disponible.");
+            }
+            
+            // Verify and assign wagons
+            if (!getAvailableWagons($pdo, $request['date_start'], $wagon_count)) {
+                throw new Exception("Nombre insuffisant de wagons disponibles.");
+            }
+            
+            // Assign wagons to train
+            $assigned_wagons = assignWagonsToTrain($pdo, $train_id, $wagon_count, $request['date_start']);
+            if (!$assigned_wagons) {
+                throw new Exception("Erreur lors de l'assignation des wagons.");
+            }
+
+            $new_status = 'accepted';
+            $stmt = $pdo->prepare("
+                UPDATE freight_requests 
+                SET status = ?, 
+                    admin_notes = ?,
+                    assigned_train_id = ?,
+                    assigned_wagons = ?
+                WHERE id = ?
+            ");
+            $stmt->execute([
+                $new_status, 
+                $notes, 
+                $train_id,
+                '{' . implode(',', $assigned_wagons) . '}',
+                $request_id
+            ]);
+            
+            // Update train status and next available date
+            $stmt = $pdo->prepare("
+                UPDATE trains 
+                SET status = 'assigned',
+                    next_available_date = ?
+                WHERE train_id = ?
+            ");
+            $stmt->execute([$_POST['eta'], $train_id]);
 
             $metadata = [
                 'price' => $_POST['price'],
-                'wagon_count' => $_POST['wagon_count'],
+                'wagon_count' => $wagon_count,
                 'eta' => $_POST['eta'],
                 'origin' => $request['origin'],
-                'destination' => $request['destination']
+                'destination' => $request['destination'],
+                'train_number' => $train['train_number']
             ];
-            $message = "Votre demande #$request_id a été approuvée. Prix: {$_POST['price']}€, Wagons: {$_POST['wagon_count']}, ETA: {$_POST['eta']}";
+            
+            $message = "Votre demande #$request_id a été approuvée. Prix: {$_POST['price']}€, " .
+                      "Wagons: $wagon_count, Train: {$train['train_number']}, ETA: {$_POST['eta']}";
             $notification_type = 'request_approved';
             $notification_title = 'Demande Approuvée';
         } else {
@@ -153,21 +265,28 @@ $recent_activity = $pdo->query("
     LIMIT 5
 ")->fetchAll();
 
-// Replace the recent activity query with this (around line 120 in your code):
+// Replace your confirmed_requests query with this optimized version:
 $confirmed_requests = $pdo->query("
     SELECT fr.id AS request_id, fr.*, 
            c.company_name, c.account_code,
            g1.libelle AS origin, g2.libelle AS destination,
            m.description AS merchandise, m.code AS merchandise_code,
            u.email AS client_email,
-           n.metadata
+           (latest_notif.metadata->>'price')::numeric AS price,
+           latest_notif.metadata->>'wagon_count' AS wagon_count_from_notif,
+           latest_notif.metadata->>'eta' AS eta
     FROM freight_requests fr
     JOIN clients c ON fr.sender_client_id = c.client_id
     JOIN users u ON c.user_id = u.user_id
     JOIN gares g1 ON fr.gare_depart = g1.id_gare
     JOIN gares g2 ON fr.gare_arrivee = g2.id_gare
     LEFT JOIN merchandise m ON fr.merchandise_id = m.merchandise_id
-    JOIN notifications n ON fr.id = n.related_request_id
+    LEFT JOIN (
+        SELECT related_request_id, metadata, created_at,
+               ROW_NUMBER() OVER (PARTITION BY related_request_id ORDER BY created_at DESC) as rn
+        FROM notifications
+        WHERE type = 'request_approved'
+    ) latest_notif ON fr.id = latest_notif.related_request_id AND latest_notif.rn = 1
     WHERE fr.status = 'client_confirmed'
     ORDER BY fr.updated_at DESC
     LIMIT 5
@@ -601,38 +720,92 @@ $confirmed_requests = $pdo->query("
 
     <!-- Sidebar Navigation -->
     <div class="admin-sidebar">
+        <div class="sidebar-header">
+            <h5 class="mb-0">Administration</h5>
+        </div>
         <div class="admin-profile">
             <div class="admin-avatar">
                 <i class="fas fa-user-shield"></i>
             </div>
-            <h5 class="mt-3 mb-0"><?= htmlspecialchars($admin['department'] ?? 'Administrateur') ?></h5>
-            <small class="text-white-50">Niveau d'accès: <?= $admin['access_level'] ?? 1 ?></small>
+            <h6 class="mt-3 mb-1"><?= htmlspecialchars($admin['department']) ?></h6>
+            <small class="text-white-50">Administrateur</small>
         </div>
-        
-        <ul class="nav flex-column px-3">
+        <ul class="nav flex-column">
             <li class="nav-item">
-                <a class="nav-link active" href="admin-dashboard.php">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'admin-dashboard.php' ? 'active' : '' ?>" 
+                   href="admin-dashboard.php">
                     <i class="fas fa-tachometer-alt"></i> Tableau de bord
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="manage-clients.php">
-                    <i class="fas fa-users"></i> Gestion Clients
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'admin-requests.php' ? 'active' : '' ?>" 
+                   href="admin-requests.php">
+                    <i class="fas fa-tasks"></i> Demandes de fret
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="manage-stations.php">
-                    <i class="fas fa-train"></i> Gestion Gares
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'admin-notifications.php' ? 'active' : '' ?>" 
+                   href="admin-notifications.php">
+                    <i class="fas fa-bell"></i> Notifications
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="manage-tariffs.php">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-clients.php' ? 'active' : '' ?>" 
+                   href="manage-clients.php">
+                    <i class="fas fa-users"></i> Clients
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-agents.php' ? 'active' : '' ?>" 
+                   href="manage-agents.php">
+                    <i class="fas fa-user-tie"></i> Agents
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-trains.php' ? 'active' : '' ?>" 
+                   href="manage-trains.php">
+                    <i class="fas fa-train"></i> Trains
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-wagons.php' ? 'active' : '' ?>" 
+                   href="manage-wagons.php">
+                    <i class="fas fa-box"></i> Wagons
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-tariffs.php' ? 'active' : '' ?>" 
+                   href="manage-tariffs.php">
                     <i class="fas fa-money-bill-wave"></i> Tarifs
                 </a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="admin-settings.php">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-gares.php' ? 'active' : '' ?>" 
+                   href="manage-gares.php">
+                    <i class="fas fa-map-marker-alt"></i> Gares
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'manage-merchandise.php' ? 'active' : '' ?>" 
+                   href="manage-merchandise.php">
+                    <i class="fas fa-boxes"></i> Marchandises
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'admin-contracts.php' ? 'active' : '' ?>" 
+                   href="admin-contracts.php">
+                    <i class="fas fa-chart-bar"></i> Contrats
+                </a> 
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= basename($_SERVER['PHP_SELF']) === 'admin-settings.php' ? 'active' : '' ?>" 
+                   href="admin-settings.php">
                     <i class="fas fa-cog"></i> Paramètres
+                </a>
+            </li>
+            <li class="nav-item mt-3">
+                <a class="nav-link text-danger" href="logout.php">
+                    <i class="fas fa-sign-out-alt"></i> Déconnexion
                 </a>
             </li>
         </ul>
@@ -685,224 +858,234 @@ $confirmed_requests = $pdo->query("
             </div>
         </div>
 
-        <!-- Pending Requests Card -->
-        <div class="card dashboard-card mb-4 animate-fade">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="mb-0"><i class="fas fa-clock me-2 text-warning"></i>Demandes en Attente</h5>
-                <span class="badge bg-primary rounded-pill"><?= count($pending_requests) ?></span>
+<!-- Pending Requests Card -->
+<div class="card dashboard-card mb-4 animate-fade">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="fas fa-clock me-2 text-warning"></i>Demandes en Attente</h5>
+        <span class="badge bg-primary rounded-pill"><?= count($pending_requests) ?></span>
+    </div>
+    <div class="card-body">
+        <?php if (empty($pending_requests)): ?>
+            <div class="alert alert-info mb-0">
+                <i class="fas fa-info-circle me-2"></i>Aucune demande en attente
             </div>
-            <div class="card-body">
-                <?php if (empty($pending_requests)): ?>
-                    <div class="alert alert-info mb-0">
-                        <i class="fas fa-info-circle me-2"></i>Aucune demande en attente
-                    </div>
-                <?php else: ?>
-                    <div class="table-responsive">
-                        <table class="table data-table">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Client</th>
-                                    <th>Trajet</th>
-                                    <th>Marchandise</th>
-                                    <th>Quantité</th>
-                                    <th>Date</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($pending_requests as $request): ?>
-                                    <tr>
-                                        <td><span class="badge bg-light text-dark">FR-<?= $request['request_id'] ?></span></td>
-                                        <td>
-                                            <div class="fw-semibold"><?= htmlspecialchars($request['company_name']) ?></div>
-                                            <small class="text-muted"><?= $request['client_email'] ?></small>
-                                        </td>
-                                        <td>
-                                            <div class="d-flex align-items-center">
-                                                <span class="text-danger me-2"><i class="fas fa-map-marker-alt"></i></span>
-                                                <div>
-                                                    <div><?= htmlspecialchars($request['origin']) ?></div>
-                                                    <div class="text-muted small">à</div>
-                                                    <div><?= htmlspecialchars($request['destination']) ?></div>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td>
-                                            <?= htmlspecialchars($request['merchandise'] ?? $request['description']) ?>
-                                            <?php if (!empty($request['merchandise_code'])): ?>
-                                                <br><small class="text-muted">Code: <?= $request['merchandise_code'] ?></small>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td><?= number_format($request['quantity'], 0, ',', ' ') ?> kg</td>
-                                        <td><?= date('d/m/Y', strtotime($request['date_start'])) ?></td>
-                                        <td>
-                                            <div class="d-flex">
-                                                <button class="btn-action btn-outline-primary me-1" data-bs-toggle="modal"
-                                                    data-bs-target="#detailsModal<?= $request['request_id'] ?>"
-                                                    title="Voir détails">
-                                                    <i class="fas fa-eye"></i>
-                                                </button>
-                                                <button class="btn-action btn-success me-1" data-bs-toggle="modal"
-                                                    data-bs-target="#approveModal<?= $request['request_id'] ?>"
-                                                    title="Approuver">
-                                                    <i class="fas fa-check"></i>
-                                                </button>
-                                                <button class="btn-action btn-danger" data-bs-toggle="modal"
-                                                    data-bs-target="#rejectModal<?= $request['request_id'] ?>"
-                                                    title="Rejeter">
-                                                    <i class="fas fa-times"></i>
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php endif; ?>
-            </div>
-        </div>
-
-        <!-- Confirmed Requests Card -->
-        <div class="card dashboard-card mb-4 animate-fade">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="mb-0"><i class="fas fa-check-circle me-2 text-success"></i>Demandes Confirmées</h5>
-                <span class="badge bg-success rounded-pill"><?= count($confirmed_requests) ?></span>
-            </div>
-            <div class="card-body">
-                <?php if (empty($confirmed_requests)): ?>
-                    <div class="alert alert-info mb-0">
-                        <i class="fas fa-info-circle me-2"></i>Aucune demande confirmée récemment
-                    </div>
-                <?php else: ?>
-                    <div class="table-responsive">
-                        <table class="table data-table">
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Client</th>
-                                    <th>Trajet</th>
-                                    <th>Marchandise</th>
-                                    <th>Prix</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($confirmed_requests as $request): 
-                                    $meta = json_decode($request['metadata'] ?? '{}', true);
-                                ?>
-                                    <tr>
-                                        <td><span class="badge bg-light text-dark">FR-<?= $request['request_id'] ?></span></td>
-                                        <td>
-                                            <div class="fw-semibold"><?= htmlspecialchars($request['company_name']) ?></div>
-                                            <small class="text-muted"><?= $request['client_email'] ?></small>
-                                        </td>
-                                        <td>
-                                            <div class="d-flex align-items-center">
-                                                <span class="text-danger me-2"><i class="fas fa-map-marker-alt"></i></span>
-                                                <div>
-                                                    <div><?= htmlspecialchars($request['origin']) ?></div>
-                                                    <div class="text-muted small">à</div>
-                                                    <div><?= htmlspecialchars($request['destination']) ?></div>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td><?= htmlspecialchars($request['merchandise'] ?? $request['description']) ?></td>
-                                        <td>
-                                            <?php if (isset($meta['price'])): ?>
-                                                <span class="fw-bold"><?= htmlspecialchars($meta['price']) ?> €</span>
-                                                <br>
-                                                <small class="text-muted">
-                                                    <?= isset($meta['wagon_count']) ? htmlspecialchars($meta['wagon_count']) . ' wagons' : '' ?>
-                                                </small>
-                                            <?php else: ?>
-                                                <span class="text-muted">N/A</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td>
-                                            <div class="d-flex">
-                                                <a href="request_details.php?id=<?= $request['request_id'] ?>" 
-                                                   class="btn-action btn-outline-primary me-1"
-                                                   title="Voir détails">
-                                                    <i class="fas fa-eye"></i>
-                                                </a>
-                                                <a href="create_contract.php?request_id=<?= $request['request_id'] ?>" 
-                                                   class="btn-action btn-success"
-                                                   title="Créer contrat">
-                                                    <i class="fas fa-file-contract"></i>
-                                                </a>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php endif; ?>
-            </div>
-        </div>
-
-        <!-- Recent Activity Card -->
-        <div class="card dashboard-card animate-fade">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="mb-0"><i class="fas fa-history me-2 text-info"></i>Activité Récente</h5>
-                <a href="#" class="btn btn-sm btn-outline-secondary">Voir tout</a>
-            </div>
-            <div class="card-body p-0">
-                <?php if (empty($recent_activity)): ?>
-                    <div class="alert alert-info m-3">
-                        <i class="fas fa-info-circle me-2"></i>Aucune activité récente
-                    </div>
-                <?php else: ?>
-                    <div class="list-group list-group-flush">
-                        <?php foreach ($recent_activity as $activity): ?>
-                            <div class="list-group-item border-0 py-3 px-4">
-                                <div class="d-flex justify-content-between align-items-start">
-                                    <div class="me-3">
-                                        <div class="d-flex align-items-center mb-1">
-                                            <span class="badge <?= $activity['status'] === 'accepted' ? 'bg-success' : 'bg-danger' ?> me-2">
-                                                <?= $activity['status'] === 'accepted' ? 'Approuvée' : 'Rejetée' ?>
-                                            </span>
-                                            <strong>Demande #<?= $activity['request_id'] ?></strong>
-                                        </div>
-                                        <div class="text-muted small">
-                                            <?= htmlspecialchars($activity['company_name']) ?>
+        <?php else: ?>
+            <div class="table-responsive">
+                <table class="table data-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Client</th>
+                            <th>Trajet</th>
+                            <th>Marchandise</th>
+                            <th>Quantité</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($pending_requests as $request): ?>
+                            <tr>
+                                <td><span class="badge bg-light text-dark">FR-<?= $request['request_id'] ?></span></td>
+                                <td>
+                                    <div class="fw-semibold"><?= htmlspecialchars($request['company_name']) ?></div>
+                                    <small class="text-muted"><?= $request['client_email'] ?></small>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <span class="text-danger me-2"><i class="fas fa-map-marker-alt"></i></span>
+                                        <div>
+                                            <div><?= htmlspecialchars($request['origin']) ?></div>
+                                            <div class="text-muted small">à</div>
+                                            <div><?= htmlspecialchars($request['destination']) ?></div>
                                         </div>
                                     </div>
-                                    <small class="text-muted text-nowrap">
-                                        <?= date('d/m/Y H:i', strtotime($activity['updated_at'])) ?>
-                                    </small>
+                                </td>
+                                <td>
+                                    <?= htmlspecialchars($request['merchandise'] ?? $request['description']) ?>
+                                    <?php if (!empty($request['merchandise_code'])): ?>
+                                        <br><small class="text-muted">Code: <?= $request['merchandise_code'] ?></small>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <?php if ($request['quantity_unit'] === 'wagons'): ?>
+                                        <?= $request['wagon_count'] ?> wagons
+                                    <?php else: ?>
+                                        <?= number_format($request['quantity'], 0, ',', ' ') ?> kg
+                                    <?php endif; ?>
+                                </td>
+                                <td><?= date('d/m/Y', strtotime($request['date_start'])) ?></td>
+                                <td>
+                                    <div class="d-flex">
+                                        <button class="btn-action btn-outline-primary me-1" data-bs-toggle="modal"
+                                            data-bs-target="#detailsModal<?= $request['request_id'] ?>"
+                                            title="Voir détails">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        <button class="btn-action btn-success me-1" data-bs-toggle="modal"
+                                            data-bs-target="#approveModal<?= $request['request_id'] ?>"
+                                            title="Approuver">
+                                            <i class="fas fa-check"></i>
+                                        </button>
+                                        <button class="btn-action btn-danger" data-bs-toggle="modal"
+                                            data-bs-target="#rejectModal<?= $request['request_id'] ?>"
+                                            title="Rejeter">
+                                            <i class="fas fa-times"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
+    </div>
+</div>
+
+<!-- Confirmed Requests Card -->
+<div class="card dashboard-card mb-4 animate-fade">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="fas fa-check-circle me-2 text-success"></i>Demandes Confirmées</h5>
+        <span class="badge bg-success rounded-pill"><?= count($confirmed_requests) ?></span>
+    </div>
+    <div class="card-body">
+        <?php if (empty($confirmed_requests)): ?>
+            <div class="alert alert-info mb-0">
+                <i class="fas fa-info-circle me-2"></i>Aucune demande confirmée récemment
+            </div>
+        <?php else: ?>
+            <div class="table-responsive">
+                <table class="table data-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Client</th>
+                            <th>Trajet</th>
+                            <th>Marchandise</th>
+                            <th>Quantité</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($confirmed_requests as $request): 
+                            $meta = json_decode($request['metadata'] ?? '{}', true);
+                            $quantity = ($request['quantity_unit'] === 'wagons') 
+                                ? ($request['wagon_count'] ?? $meta['wagon_count'] ?? null)
+                                : ($request['quantity'] ?? $meta['quantity'] ?? null);
+                            $unit = $request['quantity_unit'] ?? ($meta['quantity_unit'] ?? 'kg');
+                            $price = $meta['price'] ?? $request['price_quoted'] ?? null;
+                        ?>
+                            <tr>
+                                <td><span class="badge bg-light text-dark">FR-<?= $request['request_id'] ?></span></td>
+                                <td>
+                                    <div class="fw-semibold"><?= htmlspecialchars($request['company_name']) ?></div>
+                                    <small class="text-muted"><?= $request['client_email'] ?></small>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <span class="text-danger me-2"><i class="fas fa-map-marker-alt"></i></span>
+                                        <div>
+                                            <div><?= htmlspecialchars($request['origin']) ?></div>
+                                            <div class="text-muted small">à</div>
+                                            <div><?= htmlspecialchars($request['destination']) ?></div>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td><?= htmlspecialchars($request['merchandise'] ?? $request['description']) ?></td>
+                                <td>
+                                    <?php if (!empty($quantity)): ?>
+                                        <i class="fas <?= $unit === 'wagons' ? 'fa-train text-primary' : 'fa-weight text-success' ?> me-1"></i>
+                                        <?= number_format($quantity, 0, ',', ' ') ?>
+                                        <?= $unit === 'wagons' ? 'wagons' : 'kg' ?>
+                                    <?php else: ?>
+                                        <span class="text-muted">N/A</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <div class="d-flex">
+                                        <a href="admin-request-details.php?id=<?= $request['request_id'] ?>" 
+                                           class="btn-action btn-outline-primary me-1"
+                                           title="Voir détails">
+                                            <i class="fas fa-eye"></i>
+                                        </a>
+                                        <a href="create_contract.php?request_id=<?= $request['request_id'] ?>" 
+                                           class="btn-action btn-success"
+                                           title="Créer contrat">
+                                            <i class="fas fa-file-contract"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
+    </div>
+</div>
+
+<!-- Recent Activity Card -->
+<div class="card dashboard-card animate-fade">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="fas fa-history me-2 text-info"></i>Activité Récente</h5>
+        <a href="#" class="btn btn-sm btn-outline-secondary">Voir tout</a>
+    </div>
+    <div class="card-body p-0">
+        <?php if (empty($recent_activity)): ?>
+            <div class="alert alert-info m-3">
+                <i class="fas fa-info-circle me-2"></i>Aucune activité récente
+            </div>
+        <?php else: ?>
+            <div class="list-group list-group-flush">
+                <?php foreach ($recent_activity as $activity): 
+                    $meta = json_decode($activity['metadata'], true);
+                ?>
+                    <div class="list-group-item border-0 py-3 px-4">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div class="me-3">
+                                <div class="d-flex align-items-center mb-1">
+                                    <span class="badge <?= $activity['status'] === 'accepted' ? 'bg-success' : 'bg-danger' ?> me-2">
+                                        <?= $activity['status'] === 'accepted' ? 'Approuvée' : 'Rejetée' ?>
+                                    </span>
+                                    <strong>Demande #<?= $activity['request_id'] ?></strong>
                                 </div>
-                                <?php if ($activity['status'] === 'accepted' && $activity['metadata']): ?>
-                                    <?php $meta = json_decode($activity['metadata'], true); ?>
-                                    <div class="mt-2 d-flex flex-wrap gap-2">
-                                        <?php if (isset($meta['price'])): ?>
-                                            <span class="badge bg-light text-dark">
-                                                <i class="fas fa-euro-sign text-success me-1"></i>
-                                                <?= htmlspecialchars($meta['price']) ?> €
-                                            </span>
-                                        <?php endif; ?>
-                                        <?php if (isset($meta['wagon_count'])): ?>
-                                            <span class="badge bg-light text-dark">
-                                                <i class="fas fa-train text-primary me-1"></i>
-                                                <?= htmlspecialchars($meta['wagon_count']) ?> wagons
-                                            </span>
-                                        <?php endif; ?>
-                                        <?php if (isset($meta['eta'])): ?>
-                                            <span class="badge bg-light text-dark">
-                                                <i class="fas fa-calendar-check text-info me-1"></i>
-                                                <?= htmlspecialchars($meta['eta']) ?>
-                                            </span>
-                                        <?php endif; ?>
-                                    </div>
+                                <div class="text-muted small">
+                                    <?= htmlspecialchars($activity['company_name']) ?>
+                                </div>
+                            </div>
+                            <small class="text-muted text-nowrap">
+                                <?= date('d/m/Y H:i', strtotime($activity['updated_at'])) ?>
+                            </small>
+                        </div>
+                        <?php if ($activity['status'] === 'accepted' && $meta): ?>
+                            <div class="mt-2 d-flex flex-wrap gap-2">
+                                <?php if (isset($meta['price'])): ?>
+                                    <span class="badge bg-light text-dark">
+                                        <i class="fas fa-euro-sign text-success me-1"></i>
+                                        <?= number_format($meta['price'], 2, ',', ' ') ?> €
+                                    </span>
+                                <?php endif; ?>
+                                <?php if (isset($meta['wagon_count'])): ?>
+                                    <span class="badge bg-light text-dark">
+                                        <i class="fas fa-train text-primary me-1"></i>
+                                        <?= $meta['wagon_count'] ?> wagons
+                                    </span>
+                                <?php endif; ?>
+                                <?php if (isset($meta['eta'])): ?>
+                                    <span class="badge bg-light text-dark">
+                                        <i class="fas fa-calendar-check text-info me-1"></i>
+                                        <?= htmlspecialchars($meta['eta']) ?>
+                                    </span>
                                 <?php endif; ?>
                             </div>
-                        <?php endforeach; ?>
+                        <?php endif; ?>
                     </div>
-                <?php endif; ?>
+                <?php endforeach; ?>
             </div>
-        </div>
+        <?php endif; ?>
+    </div>
+</div>
     </div>
 
     <!-- Modals for each request -->
@@ -995,16 +1178,25 @@ $confirmed_requests = $pdo->query("
                                                 <?php endif; ?>
                                             </p>
                                         </div>
-                                        <div class="mb-3">
-                                            <label class="form-label text-muted"><strong>Quantité</strong></label>
-                                            <p class="border-bottom pb-2">
-                                                <?php if (!empty($request['quantity'])): ?>
-                                                    <i class="fas fa-weight me-1"></i><?= number_format($request['quantity'], 0, ',', ' ') ?> kg
-                                                <?php else: ?>
-                                                    <span class="text-secondary fst-italic">Aucun</span>
-                                                <?php endif; ?>
-                                            </p>
-                                        </div>
+<div class="mb-3">
+    <label class="form-label text-muted"><strong>Quantité</strong></label>
+    <p class="border-bottom pb-2">
+        <?php if (!empty($request['quantity_unit'])): ?>
+            <?php if ($request['quantity_unit'] === 'wagons' && !empty($request['wagon_count'])): ?>
+                <i class="fas fa-train me-1"></i>
+                <?= number_format($request['wagon_count'], 0, ',', ' ') ?> wagons
+            <?php elseif ($request['quantity_unit'] === 'kg' && !empty($request['quantity'])): ?>
+                <i class="fas fa-weight me-1"></i>
+                <?= number_format($request['quantity'], 0, ',', ' ') ?> kg
+            <?php else: ?>
+                <span class="text-secondary fst-italic">Aucun</span>
+            <?php endif; ?>
+        <?php else: ?>
+            <span class="text-secondary fst-italic">Aucun</span>
+        <?php endif; ?>
+    </p>
+</div>
+
                                         <div class="mb-3">
                                             <label class="form-label text-muted"><strong>Date souhaitée</strong></label>
                                             <p class="border-bottom pb-2">
@@ -1039,70 +1231,139 @@ $confirmed_requests = $pdo->query("
             </div>
         </div>
 
-        <!-- Approve Modal -->
-        <div class="modal fade" id="approveModal<?= $request['request_id'] ?>" tabindex="-1">
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <form method="POST">
-                        <input type="hidden" name="request_id" value="<?= $request['request_id'] ?>">
-                        <input type="hidden" name="action" value="approve">
-                        <div class="modal-header bg-success text-white">
-                            <h5 class="modal-title">
-                                <i class="fas fa-check-circle me-2"></i>Approuver Demande #<?= $request['request_id'] ?>
-                            </h5>
-                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                        </div>
-                        <div class="modal-body">
-                            <div class="price-calculator">
-                                <h6><i class="fas fa-calculator me-2"></i>Calculateur de Prix</h6>
-                                <div class="row g-2">
-                                    <div class="col-md-6">
-                                        <label class="form-label">Distance (km)</label>
-                                        <input type="number" class="form-control distance-input" 
-                                            data-origin="<?= $request['gare_depart'] ?>" 
-                                            data-destination="<?= $request['gare_arrivee'] ?>"
-                                            placeholder="Calcul automatique">
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label">Tarif (€/km)</label>
-                                        <input type="number" class="form-control tariff-input" step="0.01" value="0.25">
-                                    </div>
-                                    <div class="col-md-12">
-                                        <label class="form-label">Prix Calculé</label>
-                                        <input type="number" class="form-control calculated-price" readonly>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="mb-3">
-                                <label class="form-label">Prix proposé (€)</label>
-                                <input type="number" name="price" class="form-control price-input" step="0.01" min="0" required>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">Nombre de wagons</label>
-                                <input type="number" name="wagon_count" class="form-control" min="1" required>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">Date estimée d'arrivée</label>
-                                <input type="date" name="eta" class="form-control" min="<?= date('Y-m-d', strtotime($request['date_start'])) ?>" required>
-                            </div>
-                            <div class="mb-3">
-                                <label class="form-label">Notes (optionnel)</label>
-                                <textarea class="form-control" name="notes" rows="3"></textarea>
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-                                <i class="fas fa-times me-1"></i>Annuler
-                            </button>
-                            <button type="submit" class="btn btn-success">
-                                <i class="fas fa-check me-1"></i>Confirmer l'approbation
-                            </button>
-                        </div>
-                    </form>
+      <!-- Approve Modal -->
+<div class="modal fade" id="approveModal<?= $request['request_id'] ?>" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form method="POST" id="approvalForm<?= $request['request_id'] ?>">
+                <input type="hidden" name="request_id" value="<?= $request['request_id'] ?>">
+                <input type="hidden" name="action" value="approve">
+                <input type="hidden" id="client_id_<?= $request['request_id'] ?>" value="<?= $request['sender_client_id'] ?>">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-check-circle me-2"></i>Approuver Demande #<?= $request['request_id'] ?>
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
-            </div>
+                <div class="modal-body">
+                    <!-- Train Selection -->
+                    <div class="mb-4">
+                        <h6><i class="fas fa-train me-2"></i>Sélection du Train</h6>
+                        <?php 
+                        $available_trains = getAvailableTrains($pdo, $request['date_start']);
+                        if (empty($available_trains)): 
+                        ?>
+                            <div class="alert alert-warning">
+                                <i class="fas fa-exclamation-triangle me-2"></i>
+                                Aucun train disponible pour la date demandée.
+                            </div>
+                        <?php else: ?>
+                            <div class="mb-3">
+                                <label class="form-label">Train Disponible <span class="text-danger">*</span></label>
+                                <select name="train_id" class="form-select" required>
+                                    <option value="">-- Sélectionnez un train --</option>
+                                    <?php foreach ($available_trains as $train): ?>
+                                        <option value="<?= $train['train_id'] ?>">
+                                            Train #<?= htmlspecialchars($train['train_number']) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        <?php endif; ?>
+                        </div>
+                        
+                    <!-- Wagon Availability -->
+                    <div class="mb-4">
+                        <h6><i class="fas fa-boxes me-2"></i>Disponibilité des Wagons</h6>
+                        <?php
+                        $requested_wagons = $request['quantity_unit'] === 'wagons' 
+                            ? $request['wagon_count'] 
+                            : ceil($request['quantity'] / 1000); // Assuming 1 wagon = 1000kg
+                        
+                        $wagons_available = getAvailableWagons($pdo, $request['date_start'], $requested_wagons);
+                        ?>
+                        
+                        <div class="alert <?= $wagons_available ? 'alert-success' : 'alert-warning' ?>">
+                            <i class="fas <?= $wagons_available ? 'fa-check-circle' : 'fa-exclamation-triangle' ?> me-2"></i>
+                            <?php if ($wagons_available): ?>
+                                <?= $requested_wagons ?> wagon(s) disponible(s) pour la date demandée.
+                            <?php else: ?>
+                                Nombre insuffisant de wagons disponibles (<?= $requested_wagons ?> demandés).
+                            <?php endif; ?>
+                            </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Nombre de Wagons à Assigner <span class="text-danger">*</span></label>
+                            <input type="number" name="wagon_count" id="wagon_count_<?= $request['request_id'] ?>" 
+                                class="form-control wagon-input" min="1" 
+                                value="<?= $requested_wagons ?>" 
+                                max="<?= $wagons_available ? $requested_wagons : 0 ?>"
+                                required>
+                            <small class="form-text text-muted">
+                                Basé sur <?= $request['quantity_unit'] === 'wagons' ? 'la demande directe' : 'le poids total' ?>
+                            </small>
+                            </div>
+                    </div>
+
+                    <!-- Price Calculator -->
+                    <div class="price-calculator mb-4">
+                        <h6><i class="fas fa-calculator me-2"></i>Calculateur de Prix</h6>
+                        <div class="alert alert-info mb-3">
+                            <i class="fas fa-info-circle me-2"></i>
+                            Le prix est calculé automatiquement en fonction du tarif client et de la distance.
+                        </div>
+                        
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label">Distance Estimée (km)</label>
+                                <input type="number" class="form-control distance-input" 
+                                    id="distance_<?= $request['request_id'] ?>"
+                                    data-origin="<?= $request['gare_depart'] ?>" 
+                                    data-destination="<?= $request['gare_arrivee'] ?>"
+                                    readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Tarif Client (€/km)</label>
+                                <input type="number" class="form-control tariff-input" 
+                                    id="tariff_<?= $request['request_id'] ?>" 
+                                    step="0.01" readonly>
+</div>
+                            <div class="col-md-6">
+                                <label class="form-label">Prix Calculé (€)</label>
+                                <input type="number" class="form-control calculated-price" 
+                                    id="calculated_price_<?= $request['request_id'] ?>" readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Prix Final (€) <span class="text-danger">*</span></label>
+                                <input type="number" name="price" id="final_price_<?= $request['request_id'] ?>" 
+                                    class="form-control price-input" step="0.01" min="0" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="form-label">Date estimée d'arrivée <span class="text-danger">*</span></label>
+                        <input type="date" name="eta" class="form-control" 
+                            min="<?= date('Y-m-d', strtotime($request['date_start'])) ?>" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Notes (optionnel)</label>
+                        <textarea class="form-control" name="notes" rows="3"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                        <i class="fas fa-times me-1"></i>Annuler
+                    </button>
+                    <button type="submit" class="btn btn-success" <?= (!$wagons_available || empty($available_trains)) ? 'disabled' : '' ?>>
+                        <i class="fas fa-check me-1"></i>Confirmer l'approbation
+                    </button>
+                </div>
+            </form>
         </div>
+    </div>
+</div>
 
         <!-- Reject Modal -->
         <div class="modal fade" id="rejectModal<?= $request['request_id'] ?>" tabindex="-1">
@@ -1143,37 +1404,83 @@ $confirmed_requests = $pdo->query("
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Toggle sidebar on mobile
-        document.getElementById('mobileSidebarToggle').addEventListener('click', function() {
-            document.querySelector('.admin-sidebar').classList.toggle('show');
-        });
-
-        // Price calculator functionality
-        document.querySelectorAll('.distance-input').forEach(input => {
-            input.addEventListener('change', function() {
-                const distance = parseFloat(this.value) || 0;
-                const tariff = parseFloat(this.closest('.price-calculator').querySelector('.tariff-input').value) || 0;
-                const price = distance * tariff;
-                this.closest('.price-calculator').querySelector('.calculated-price').value = price.toFixed(2);
-                
-                // Auto-fill the price field if empty
-                const priceInput = this.closest('.modal-body').querySelector('.price-input');
-                if (!priceInput.value) {
-                    priceInput.value = price.toFixed(2);
-                }
-            });
-        });
-
-        // Auto-calculate distance (placeholder for actual implementation)
-        document.querySelectorAll('.distance-input[data-origin][data-destination]').forEach(input => {
-            // In a real implementation, you would fetch the distance between stations here
-            // This is just a placeholder that sets a random distance for demonstration
-            if (!input.value) {
-                const randomDistance = Math.floor(Math.random() * 500) + 50;
-                input.value = randomDistance;
-                input.dispatchEvent(new Event('change'));
+// Price calculator functionality - Enhanced version
+document.querySelectorAll('.price-calculator').forEach(calculator => {
+    const requestId = calculator.closest('.modal').id.replace('approveModal', '');
+    const clientId = document.getElementById(`client_id_${requestId}`).value;
+    const origin = document.getElementById(`distance_${requestId}`).dataset.origin;
+    const destination = document.getElementById(`distance_${requestId}`).dataset.destination;
+    const wagonInput = document.getElementById(`wagon_count_${requestId}`);
+    const priceInput = document.getElementById(`final_price_${requestId}`);
+    const calculatedPrice = document.getElementById(`calculated_price_${requestId}`);
+    const form = document.getElementById(`approvalForm${requestId}`);
+    
+    // Function to calculate price via AJAX
+    const calculatePrice = async () => {
+        const wagonCount = wagonInput.value || 1;
+        
+        try {
+            const response = await fetch(`calculate-price.php?client_id=${clientId}&origin=${origin}&destination=${destination}&wagon_count=${wagonCount}`);
+            const data = await response.json();
+            
+            if (data.success) {
+                calculatedPrice.value = data.price.toFixed(2);
+                priceInput.value = data.price.toFixed(2);
+            } else {
+                calculatedPrice.value = '';
+                priceInput.value = '';
+                alert('Erreur lors du calcul du prix: ' + data.error);
             }
-        });
+        } catch (error) {
+            console.error('Error calculating price:', error);
+            alert('Erreur lors du calcul du prix');
+        }
+    };
+    
+    // Calculate when wagon count changes
+    wagonInput.addEventListener('change', calculatePrice);
+    
+    // Validate form before submission
+    form.addEventListener('submit', function(e) {
+        const trainSelect = this.querySelector('select[name="train_id"]');
+        const wagonCount = wagonInput.value;
+        const price = priceInput.value;
+        const eta = this.querySelector('input[name="eta"]').value;
+        
+        if (!trainSelect.value) {
+            e.preventDefault();
+            alert('Veuillez sélectionner un train');
+            return;
+        }
+        
+        if (!wagonCount || wagonCount < 1) {
+            e.preventDefault();
+            alert('Le nombre de wagons doit être supérieur à 0');
+            return;
+        }
+        
+        if (!price || price <= 0) {
+            e.preventDefault();
+            alert('Le prix doit être supérieur à 0');
+            return;
+        }
+        
+        if (!eta) {
+            e.preventDefault();
+            alert('Veuillez spécifier une date d\'arrivée estimée');
+            return;
+        }
+    });
+    
+    // Auto-calculate on modal show
+    const modal = calculator.closest('.modal');
+    modal.addEventListener('shown.bs.modal', calculatePrice);
+});
+
+// Toggle sidebar on mobile
+document.getElementById('mobileSidebarToggle').addEventListener('click', function() {
+    document.querySelector('.admin-sidebar').classList.toggle('show');
+});
     </script>
 </body>
 </html>

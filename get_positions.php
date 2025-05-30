@@ -1,4 +1,42 @@
 <?php
+require_once 'includes/config.php';
+require_once 'includes/auth_functions.php';
+
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Verify client role and session
+if (!isLoggedIn() || $_SESSION['user']['role'] !== 'client') {
+    header('Location: ../index.php');
+    exit();
+}
+
+// Ensure client_id in session
+if (!isset($_SESSION['user']['client_id'])) {
+    $stmt = $pdo->prepare("SELECT client_id FROM clients WHERE user_id = ?");
+    $stmt->execute([$_SESSION['user']['id']]);
+    $c = $stmt->fetch();
+    if (!$c) {
+        die("Error: Client account not properly configured");
+    }
+    $_SESSION['user']['client_id'] = $c['client_id'];
+}
+$client_id = $_SESSION['user']['client_id'];
+
+// Fetch client info
+$stmt = $pdo->prepare("
+    SELECT c.*, u.email 
+      FROM clients c 
+      JOIN users   u ON c.user_id = u.user_id 
+     WHERE c.client_id = ?
+");
+$stmt->execute([$client_id]);
+$client = $stmt->fetch();
+if (!$client) {
+    die("Error: Could not retrieve client information");
+}
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 

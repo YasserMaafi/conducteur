@@ -8,6 +8,8 @@ if (!isLoggedIn() || ($_SESSION['user']['role'] !== 'admin' && $_SESSION['user']
     header('Location: index.php');
     exit();
 }
+$user_id = $_SESSION['user']['id'];
+$client_id = $_SESSION['user']['client_id'];
 
 // Validate request ID
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
@@ -24,7 +26,14 @@ if ($_SESSION['user']['role'] === 'client') {
     // Admin can view any request
     $clientCheck = "";
 }
-
+$stmt = $pdo->prepare("
+    SELECT c.*, u.email 
+      FROM clients c 
+      JOIN users   u ON c.user_id = u.user_id 
+     WHERE c.client_id = ?
+");
+$stmt->execute([$client_id]);
+$client = $stmt->fetch();
 // Fetch the freight request with client information
 $stmt = $pdo->prepare("
     SELECT fr.*,
@@ -142,6 +151,15 @@ if ($_SESSION['user']['role'] === 'client') {
     $adminStmt->execute([$userId]);
     $userInfo = $adminStmt->fetch();
 }
+// Count unread notifications
+$notifCountStmt = $pdo->prepare("
+    SELECT COUNT(*) AS count
+      FROM notifications
+     WHERE user_id = ? 
+       AND is_read = FALSE
+");
+$notifCountStmt->execute([$user_id]);
+$notifCount = $notifCountStmt->fetch()['count'];
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -242,22 +260,65 @@ if ($_SESSION['user']['role'] === 'client') {
     </style>
 </head>
 <body>
-    <!-- Navigation -->
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container-fluid">
-            <a class="navbar-brand" href="#">
-                <i class="fas fa-train me-2"></i>SNCFT <?= $_SESSION['user']['role'] === 'admin' ? 'Admin' : 'Client' ?>
-            </a>
-            <div class="d-flex align-items-center">
-                <span class="text-white me-3">
-                    <i class="fas fa-building me-1"></i> <?= htmlspecialchars($userInfo['company_name'] ?? '') ?>
+ <!-- NAVBAR -->
+  <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="#">
+        <i class="fas fa-train me-2"></i>SNCFT Client
+      </a>
+      <div class="d-flex align-items-center">
+<!-- Notification Dropdown -->
+<div class="dropdown me-3">
+    <button class="btn btn-primary position-relative" type="button" id="dropdownNotification" data-bs-toggle="dropdown" aria-expanded="false">
+        <span class="navbar-notification-icon">
+            <i class="fas fa-bell"></i>
+            <?php if ($notifCount > 0): ?>
+                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger notification-badge">
+                    <?= $notifCount > 9 ? '9+' : $notifCount ?>
                 </span>
-                <a href="logout.php" class="btn btn-outline-light">
-                    <i class="fas fa-sign-out-alt"></i>
-                </a>
-            </div>
+            <?php endif; ?>
+        </span>
+    </button>
+    <div class="dropdown-menu dropdown-menu-end dropdown-notifications" aria-labelledby="dropdownNotification">
+        <div class="dropdown-header">
+            <i class="fas fa-bell me-2"></i>Notifications
         </div>
-    </nav>
+        
+        <?php if (empty($notifications)): ?>
+            <div class="p-3 text-center text-muted">Aucune nouvelle notification</div>
+        <?php else: ?>
+            <?php foreach ($notifications as $n): ?>
+                <?php 
+                    // Get related request ID from notification
+                    $request_id = $n['related_request_id'];
+                    $link = $request_id ? "request_details.php?id=$request_id" : '#';
+                    $cls  = $n['is_read'] ? '' : 'unread';
+                ?>
+                <a href="<?= htmlspecialchars($link) ?>" class="dropdown-item notification-item <?= $cls ?> px-3 py-2 border-bottom" data-id="<?= $n['id'] ?>">
+                    <div class="d-flex justify-content-between">
+                        <strong><?= htmlspecialchars($n['title']) ?></strong>
+                        <small class="text-muted"><?= time_elapsed_string($n['created_at']) ?></small>
+                    </div>
+                    <small><?= htmlspecialchars($n['message']) ?></small>
+                </a>
+            <?php endforeach; ?>
+        <?php endif; ?>
+        
+        <div class="dropdown-footer">
+            <a href="notifications.php" class="btn btn-sm btn-link">Voir toutes les notifications</a>
+        </div>
+    </div>
+</div>
+        
+        <span class="text-white me-3">
+          <i class="fas fa-building me-1"></i><?= htmlspecialchars($client['company_name']) ?>
+        </span>
+        <a href="logout.php" class="btn btn-outline-light">
+          <i class="fas fa-sign-out-alt"></i> 
+        </a>
+      </div>
+    </div>
+  </nav>
 
     <!-- Main Content -->
     <div class="container-fluid mt-4">
@@ -319,53 +380,56 @@ if ($_SESSION['user']['role'] === 'client') {
                 
                 <div class="d-flex justify-content-between align-items-center mb-4">
                     <h2 class="h3 mb-0">Détails de la Demande #<?= htmlspecialchars($request['id']) ?></h2>
-                    <a href="<?= $_SESSION['user']['role'] === 'admin' ? 'admin-dashboard.php' : 'requests.php' ?>" class="btn btn-outline-secondary">
+                    <a href="<?= $_SESSION['user']['role'] === 'admin' ? 'admin-dashboard.php' : 'client-dashboard.php' ?>" class="btn btn-outline-secondary">
                         ← Retour
                     </a>
                 </div>
 
-                <!-- Request Details Card -->
-                <div class="card shadow-sm mb-4">
-                    <div class="card-header d-flex justify-content-between align-items-center bg-white">
-                        <span>Demande #<?= htmlspecialchars($request['id']) ?></span>
-                        <span class="badge <?= getStatusBadgeClass($request['status']) ?>">
-                            <?= formatStatus($request['status']) ?>
-                        </span>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <!-- Left column -->
-                            <div class="col-md-6">
-                                <p><strong>Expéditeur :</strong> <?= htmlspecialchars($request['sender_company_name'] ?? '') ?></p>
-                                <p><strong>Destinataire :</strong> <?= htmlspecialchars($request['recipient_name']) ?></p>
-                                <p><strong>Contact destinataire :</strong> <?= htmlspecialchars($request['recipient_contact']) ?></p>
-                                <p><strong>Marchandise :</strong>
-                                    <?= htmlspecialchars($request['merchandise_description'] ?? 'Non spécifiée') ?>
-                                </p>
-                            </div>
-                            <!-- Right column -->
-                            <div class="col-md-6">
-                                <p><strong>Départ :</strong>
-                                    <?= htmlspecialchars($request['departure_station'] ?? $request['gare_depart']) ?>
-                                </p>
-                                <p><strong>Arrivée :</strong>
-                                    <?= htmlspecialchars($request['arrival_station'] ?? $request['gare_arrivee']) ?>
-                                </p>
-                                <p><strong>Quantité :</strong> <?= htmlspecialchars($request['quantity']) ?></p>
-                                <p><strong>Mode de paiement :</strong> <?= htmlspecialchars($request['mode_paiement']) ?></p>
-                                <p><strong>Date de début :</strong> <?= formatDate($request['date_start']) ?></p>
-                            </div>
-                        </div>
+<!-- Request Details Card -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center bg-white">
+        <span>Demande #<?= htmlspecialchars($request['id']) ?></span>
+        <span class="badge <?= getStatusBadgeClass($request['status']) ?>">
+            <?= formatStatus($request['status']) ?>
+        </span>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <!-- Left column -->
+            <div class="col-md-6">
+                <p><strong>Expéditeur :</strong> <?= htmlspecialchars($request['sender_company_name'] ?? '') ?></p>
+                <p><strong>Destinataire :</strong> <?= htmlspecialchars($request['recipient_name']) ?></p>
+                <p><strong>Contact destinataire :</strong> <?= htmlspecialchars($request['recipient_contact']) ?></p>
+                <p><strong>Marchandise :</strong>
+                    <?= htmlspecialchars($request['merchandise_description'] ?? 'Non spécifiée') ?>
+                </p>
+            </div>
+            <!-- Right column -->
+            <div class="col-md-6">
+                <p><strong>Départ :</strong>
+                    <?= htmlspecialchars($request['departure_station'] ?? $request['gare_depart']) ?>
+                </p>
+                <p><strong>Arrivée :</strong>
+                    <?= htmlspecialchars($request['arrival_station'] ?? $request['gare_arrivee']) ?>
+                </p>
+                <p><strong>Quantité :</strong>
+                    <?= htmlspecialchars($request['quantity']) . ' ' . htmlspecialchars($request['quantity_unit'] ?? '') ?>
+                </p>
+                <p><strong>Mode de paiement :</strong> <?= htmlspecialchars($request['mode_paiement']) ?></p>
+                <p><strong>Date de début :</strong> <?= formatDate($request['date_start']) ?></p>
+            </div>
+        </div>
 
-                        <?php if (!empty($request['admin_notes'])): ?>
-                            <hr>
-                            <div class="admin-notes">
-                                <h5><i class="fas fa-comment-dots me-2"></i>Notes de l'admin</h5>
-                                <p class="text-muted"><?= nl2br(htmlspecialchars($request['admin_notes'])) ?></p>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                </div>
+        <?php if (!empty($request['admin_notes'])): ?>
+            <hr>
+            <div class="admin-notes">
+                <h5><i class="fas fa-comment-dots me-2"></i>Notes de l'admin</h5>
+                <p class="text-muted"><?= nl2br(htmlspecialchars($request['admin_notes'])) ?></p>
+            </div>
+        <?php endif; ?>
+    </div>
+</div>
+
 
                 <!-- Admin Decision Section -->
                 <?php if ($decisionNotification): ?>

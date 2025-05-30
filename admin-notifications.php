@@ -389,7 +389,7 @@ $unread_notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
 switch ($notif['type']) {
     case 'nouvelle_demande':
         $icon = 'fa-file-alt text-primary';
-        $link = "request_details.php?id=".$notif['related_request_id'];
+        $link = "admin-request-details.php?id=".$notif['related_request_id'];
         break;
     case 'request_approved':
         $icon = 'fa-check-circle text-success';
@@ -397,7 +397,7 @@ switch ($notif['type']) {
         break;
     case 'demande_refusée':
         $icon = 'fa-times-circle text-danger';
-        $link = "request_details.php?id=".$notif['related_request_id'];
+        $link = "admin-request-details.php?id=".$notif['related_request_id'];
         break;
     case 'client_confirmed':
         $icon = 'fa-check-double text-success';
@@ -623,7 +623,7 @@ switch ($notif['type']) {
                 <i class="fas fa-check me-1"></i> Marquer comme lu
             </a>
             <?php if ($notification['request_id']): ?>
-                <a href="request_details.php?id=<?= $notification['request_id'] ?>" class="btn btn-sm btn-outline-secondary ms-1">
+                <a href="admin-request-details.php?id=<?= $notification['request_id'] ?>" class="btn btn-sm btn-outline-secondary ms-1">
                     <i class="fas fa-eye me-1"></i> Voir demande
                 </a>
             <?php endif; ?>

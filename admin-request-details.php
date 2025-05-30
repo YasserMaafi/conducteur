@@ -17,6 +17,7 @@ $requestId = (int) $_GET['id'];
 $userId    = $_SESSION['user']['id'];
 
 // Fetch the freight request with client information
+// Replace your current freight request query with this:
 $stmt = $pdo->prepare("
     SELECT fr.*,
            g1.libelle AS departure_station,
@@ -24,7 +25,16 @@ $stmt = $pdo->prepare("
            m.description AS merchandise_description,
            sc.company_name AS sender_company_name,
            sc.phone_number AS sender_phone_number,
-           rc.company_name AS recipient_company_name
+           rc.company_name AS recipient_company_name,
+           (SELECT n.metadata->>'price' FROM notifications n 
+            WHERE n.related_request_id = fr.id AND n.type = 'request_approved' 
+            ORDER BY n.created_at DESC LIMIT 1) AS approved_price,
+           (SELECT n.metadata->>'wagon_count' FROM notifications n 
+            WHERE n.related_request_id = fr.id AND n.type = 'request_approved' 
+            ORDER BY n.created_at DESC LIMIT 1) AS approved_wagon_count,
+           (SELECT n.metadata->>'eta' FROM notifications n 
+            WHERE n.related_request_id = fr.id AND n.type = 'request_approved' 
+            ORDER BY n.created_at DESC LIMIT 1) AS approved_eta
       FROM freight_requests fr
  LEFT JOIN gares g1 ON fr.gare_depart = g1.id_gare
  LEFT JOIN gares g2 ON fr.gare_arrivee = g2.id_gare
@@ -454,7 +464,7 @@ $notifications = $notifStmt->fetchAll();
             <h2 class="h3 mb-0">
                 <i class="fas fa-file-alt me-2"></i>Détails de la Demande #<?= htmlspecialchars($request['id']) ?>
             </h2>
-            <a href="manage-requests.php" class="btn btn-outline-secondary">
+            <a href="admin-notifications.php" class="btn btn-outline-secondary">
                 <i class="fas fa-arrow-left me-1"></i> Retour
             </a>
         </div>
@@ -509,13 +519,25 @@ $notifications = $notifStmt->fetchAll();
                                 <?= htmlspecialchars($request['arrival_station'] ?? $request['gare_arrivee']) ?>
                             </span>
                         </div>
-                        
-                        <div class="mb-3">
-                            <span class="detail-label">Quantité</span>
-                            <span class="detail-value">
-                                <?= number_format($request['quantity'], 0, ',', ' ') ?> kg
-                            </span>
-                        </div>
+<div class="mb-3">
+    <label class="form-label text-muted"><strong>Quantité</strong></label>
+    <p class="border-bottom pb-2">
+        <?php if (!empty($request['quantity_unit'])): ?>
+            <?php if ($request['quantity_unit'] === 'wagons' && !empty($request['wagon_count'])): ?>
+                <i class="fas fa-train me-1"></i>
+                <?= number_format($request['wagon_count'], 0, ',', ' ') ?> wagons
+            <?php elseif ($request['quantity_unit'] === 'kg' && !empty($request['quantity'])): ?>
+                <i class="fas fa-weight me-1"></i>
+                <?= number_format($request['quantity'], 0, ',', ' ') ?> kg
+            <?php else: ?>
+                <span class="text-secondary fst-italic">Aucun</span>
+            <?php endif; ?>
+        <?php else: ?>
+            <span class="text-secondary fst-italic">Aucun</span>
+        <?php endif; ?>
+    </p>
+</div>
+
                         
                         <div class="mb-3">
                             <span class="detail-label">Date de départ</span>
@@ -540,6 +562,18 @@ $notifications = $notifStmt->fetchAll();
                         <span class="detail-value">
                             <?= nl2br(htmlspecialchars($request['admin_notes'])) ?>
                         </span>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Add this new section for contract creation -->
+                <?php if ($request['status'] === 'client_confirmed'): ?>
+                    <hr>
+                    <div class="d-flex justify-content-end">
+                        <a href="create_contract.php?request_id=<?= $request['id'] ?>" 
+                           class="btn btn-success"
+                           title="Créer contrat">
+                           <i class="fas fa-file-contract me-1"></i> Créer un contrat
+                        </a>
                     </div>
                 <?php endif; ?>
             </div>

@@ -52,9 +52,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
         
         // Validate inputs
         $required = [
-            'recipient_name', 'recipient_contact',
-            'gare_depart', 'gare_arrivee', 'merchandise_id', 
-            'quantity', 'date_start', 'mode_paiement'
+'recipient_name', 'recipient_contact',
+'gare_depart', 'gare_arrivee', 'merchandise_id', 
+'date_start', 'mode_paiement'
         ];
         
         foreach ($required as $field) {
@@ -62,6 +62,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                 throw new Exception("Le champ " . str_replace('_', ' ', $field) . " est requis");
             }
         }
+        // Validate quantity and unit
+$quantity = $_POST['quantity'] ?? null;
+$unit = $_POST['quantity_unit'] ?? '';
+
+if (empty($quantity) || !in_array($unit, ['kg', 'wagons'])) {
+    throw new Exception("Veuillez spécifier la quantité et l'unité (KG ou Wagons).");
+}
+
+if (!is_numeric($quantity) || $quantity <= 0) {
+    throw new Exception("La quantité doit être un nombre positif.");
+}
+if ($unit === 'wagons' && !is_numeric($quantity) || (int)$quantity != $quantity) {
+    throw new Exception("Le nombre de wagons doit être un entier.");
+}
 
         // Validate merchandise exists
         $stmt = $pdo->prepare("SELECT 1 FROM merchandise WHERE merchandise_id = ?");
@@ -94,27 +108,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
         $stmt->execute([$_POST['merchandise_id']]);
         $merchandise = $stmt->fetch();
 
-        // Insert freight request - USING THE LOGGED-IN CLIENT'S ID as sender
+       // Determine values for quantity and wagon_count based on unit
+        $quantityValue = ($unit === 'kg') ? (float)$quantity : null;
+        $wagonCountValue = ($unit === 'wagons') ? (int)$quantity : null;
+
+        // Insert freight request - Set quantity or wagon_count based on unit
         $stmt = $pdo->prepare("
-        INSERT INTO freight_requests (
-            sender_client_id, recipient_name, recipient_contact,
-            gare_depart, gare_arrivee, merchandise_id,
-            quantity, date_start, mode_paiement, account_code, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-    ");
-        
+            INSERT INTO freight_requests (
+                sender_client_id, recipient_name, recipient_contact,
+                gare_depart, gare_arrivee, merchandise_id,
+                quantity, quantity_unit, date_start, mode_paiement, account_code, status,
+                wagon_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        ");
+
         $stmt->execute([
-            $sender_client['client_id'], // Use the logged-in sender's ID
-            $_POST['recipient_name'],    // But use the recipient's name from the form
-            $_POST['recipient_contact'], // And recipient's contact from the form
+            $sender_client['client_id'],
+            $_POST['recipient_name'],
+            $_POST['recipient_contact'],
             $_POST['gare_depart'],
             $_POST['gare_arrivee'],
             $_POST['merchandise_id'],
-            (float)$_POST['quantity'],
+            $quantityValue,
+            $unit,
             $_POST['date_start'],
             $_POST['mode_paiement'],
-            $_POST['mode_paiement'] === 'account' ? $_POST['account_code'] : null
+            ($_POST['mode_paiement'] === 'account' ? $sender_client['account_code'] : null),
+            $wagonCountValue // Added wagon_count value
         ]);
+
         
         $request_id = $pdo->lastInsertId();
         
@@ -333,9 +355,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                                     </div>
                                     
                                     <div class="col-md-4">
-                                        <label class="form-label required-field">Quantité (KG)</label>
-                                        <input type="number" name="quantity" class="form-control" 
-                                            value="<?= $_POST['quantity'] ?? '' ?>" step="0.01" min="0.01" required>
+                                        <label class="form-label required-field">Quantité</label>   
+<div class="input-group">
+    <input type="number" name="quantity" id="quantity" class="form-control" 
+        value="<?= $_POST['quantity'] ?? '' ?>" step="0.01" min="0.01">
+    <select name="quantity_unit" id="quantity_unit" class="form-select" required>
+        <option value="">-- Unité --</option>
+        <option value="kg" <?= (($_POST['quantity_unit'] ?? '') === 'kg') ? 'selected' : '' ?>>Kilogrammes (KG)</option>
+        <option value="wagons" <?= (($_POST['quantity_unit'] ?? '') === 'wagons') ? 'selected' : '' ?>>Nombre de Wagons</option>
+    </select>
+</div>
+<small class="form-text text-muted">Entrez soit le poids total en kg ou le nombre de wagons.</small>
+
                                     </div>
                                     
                                     <div class="col-md-4">
@@ -362,9 +393,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($error)) {
                                     </div>
                                 </div>
                             </div>
-                            
-                            <!-- Add a simple map placeholder for route visualization -->
-                            <div id="map-container" class="d-none d-md-block"></div>
 
                             <!-- Form Actions -->
                             <div class="d-flex justify-content-end gap-3 mt-4">
