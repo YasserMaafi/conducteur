@@ -1,44 +1,17 @@
 <?php
 require_once 'includes/config.php';
-require_once 'includes/auth_functions.php';
 
 if (!isLoggedIn()) {
     redirect('index.php');
 }
 
-// Check if user is a driver
-if ($_SESSION['user']['role'] !== 'driver') {
+if ($_SESSION['role'] !== 'driver') {
     die("Accès réservé aux conducteurs");
 }
 
-$ngrok_url = 'https://3e9b-41-230-70-113.ngrok-free.app   ';
-$driver_id = $_SESSION['user']['id']; // Updated to use new session structure
+$ngrok_url = 'https://a4bf-41-225-2-138.ngrok-free.app'; // Remplacez par votre URL Ngrok
 
-// Fetch available trains
-$trainStmt = $pdo->prepare("
-    SELECT t.train_id, t.train_number, t.status, t.current_route
-    FROM trains t
-    WHERE t.status = 'assigned'
-    ORDER BY t.train_number
-");
-$trainStmt->execute();
-$available_trains = $trainStmt->fetchAll();
-
-// Fetch active expedition for this driver if any
-$expStmt = $pdo->prepare("
-    SELECT e.*, c.contract_id, c.status as contract_status
-    FROM expeditions e
-    JOIN contracts c ON e.contract_id = c.contract_id
-    WHERE e.status = 'in_progress'
-    AND c.train_id IN (
-        SELECT train_id 
-        FROM trains 
-        WHERE status = 'in_use'
-    )
-    LIMIT 1
-");
-$expStmt->execute();
-$active_expedition = $expStmt->fetch();
+$driver_id = $_SESSION['user_id'];
 ?>
 
 <!DOCTYPE html>
@@ -101,7 +74,7 @@ $active_expedition = $expStmt->fetch();
         <header class="dashboard-header">
             <h1><i class="fas fa-train"></i> Interface Conducteur</h1>
             <div class="user-info">
-                <span><?php echo htmlspecialchars($_SESSION['user']['username']); ?></span>
+                <span><?php echo htmlspecialchars($_SESSION['username']); ?></span>
                 <a href="logout.php" class="btn btn-logout"><i class="fas fa-sign-out-alt"></i> Déconnexion</a>
             </div>
         </header>
@@ -125,15 +98,15 @@ $active_expedition = $expStmt->fetch();
                 <h2>Statut du train</h2>
                 
                 <div class="form-group">
-                    <label>Train</label>
-                    <select id="train-select" class="train-type-select">
-                        <option value="">-- Sélectionnez un train --</option>
-                        <?php foreach ($available_trains as $train): ?>
-                            <option value="<?= $train['train_id'] ?>" 
-                                    data-route="<?= htmlspecialchars($train['current_route']) ?>">
-                                <?= htmlspecialchars($train['train_number']) ?>
-                            </option>
-                        <?php endforeach; ?>
+                    <label>Type de train</label>
+                    <select id="train-type" class="train-type-select">
+                        <option value="">-- Sélectionnez le type de train --</option>
+                        <option value="AEX">AEX</option>
+                        <option value="EMU">EMU</option>
+                        <option value="DMU">DMU</option>
+                        <option value="DP">DP</option>
+                        <option value="DN">DN</option>
+                        <option value="GT">GT</option>
                     </select>
                 </div>
                 
@@ -234,9 +207,9 @@ $active_expedition = $expStmt->fetch();
         
         // Fonction pour démarrer le suivi
         function startTracking() {
-            const trainId = document.getElementById('train-select').value;
-            if (!trainId) {
-                alert("Veuillez sélectionner un train");
+            const trainType = document.getElementById('train-type').value;
+            if (!trainType) {
+                alert("Veuillez sélectionner le type de train");
                 return;
             }
             
@@ -249,9 +222,6 @@ $active_expedition = $expStmt->fetch();
                 // Mettre à jour le statut du train
                 updateTrainStatus('active');
                 
-                // Start expedition
-                startExpedition(trainId);
-                
                 // Options pour une haute précision
                 const options = {
                     enableHighAccuracy: true,
@@ -261,7 +231,7 @@ $active_expedition = $expStmt->fetch();
                 
                 // Démarrer le watchPosition pour des mises à jour continues
                 watchId = navigator.geolocation.watchPosition(
-                    (position) => handlePositionUpdate(position, trainId),
+                    (position) => handlePositionUpdate(position, trainType),
                     handlePositionError,
                     options
                 );
@@ -270,7 +240,7 @@ $active_expedition = $expStmt->fetch();
                 document.querySelector('.btn-status').style.display = 'none';
                 document.querySelector('.btn-stop').style.display = 'inline-block';
                 
-                console.log("Suivi GPS démarré pour le train ID: " + trainId);
+                console.log("Suivi GPS démarré pour le train de type: " + trainType);
             } else {
                 alert("La géolocalisation n'est pas supportée par votre navigateur.");
             }
@@ -293,14 +263,11 @@ $active_expedition = $expStmt->fetch();
             // Mettre à jour le statut du train
             updateTrainStatus('paused');
             
-            // Stop expedition
-            stopExpedition();
-            
             console.log("Suivi GPS arrêté");
         }
         
         // Fonction pour gérer les mises à jour de position
-        function handlePositionUpdate(position, trainId) {
+        function handlePositionUpdate(position, trainType) {
             console.log("Nouvelle position:", position);
             
             // Mettre à jour le statut GPS
@@ -346,7 +313,7 @@ $active_expedition = $expStmt->fetch();
                     latest.coords.longitude,
                     speed,
                     position.timestamp,
-                    trainId
+                    trainType
                 );
             } else if (position.coords.speed !== null) {
                 // Si le navigateur fournit directement la vitesse
@@ -359,7 +326,7 @@ $active_expedition = $expStmt->fetch();
                     position.coords.longitude,
                     speed,
                     position.timestamp,
-                    trainId
+                    trainType
                 );
             }
             
@@ -397,36 +364,38 @@ $active_expedition = $expStmt->fetch();
         }
         
         // Fonction pour envoyer les données de position au serveur
-        function sendPositionData(lat, lng, speed, timestamp, trainId) {
-            const data = {
-                driver_id: <?php echo $driver_id; ?>,
-                driver_name: "<?php echo htmlspecialchars($_SESSION['user']['username']); ?>",
-                lat: lat,
-                lng: lng,
-                speed: speed,
-                timestamp: new Date(timestamp).toISOString(),
-                train_id: trainId
-            };
-            
-            fetch('update_position.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(data)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    console.error('Erreur:', data.error);
-                } else {
-                    console.log('Succès:', data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Erreur:', error);
-            });
+        function sendPositionData(lat, lng, speed, timestamp, trainType) {
+    const data = {
+        driver_id: <?php echo $driver_id; ?>,
+        driver_name: "<?php echo htmlspecialchars($_SESSION['username']); ?>",
+        lat: lat,
+        lng: lng,
+        speed: speed,
+        timestamp: new Date(timestamp).toISOString(),
+        train_type: trainType
+    };
+    
+    fetch('update_position.php', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            console.error('Erreur:', data.error);
+        } else {
+            console.log('Succès:', data.message);
         }
+    })
+    .catch(error => {
+        console.error('Erreur:', error);
+    });
+}
+
+
         
         // Fonction pour gérer les erreurs de géolocalisation
         function handlePositionError(error) {
@@ -506,57 +475,6 @@ $active_expedition = $expStmt->fetch();
             // Vérifier les nouveaux messages toutes les 5 secondes
             setInterval(fetchMessages, 5000);
         };
-
-        // Add function to start expedition
-        function startExpedition(trainId) {
-            fetch('start_expedition.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    train_id: trainId,
-                    driver_id: <?php echo $driver_id; ?>
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    console.error('Erreur:', data.error);
-                    alert('Erreur lors du démarrage de l\'expédition: ' + data.error);
-                } else {
-                    console.log('Expédition démarrée:', data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Erreur:', error);
-                alert('Erreur lors du démarrage de l\'expédition');
-            });
-        }
-
-        // Add function to stop expedition
-        function stopExpedition() {
-            fetch('stop_expedition.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    driver_id: <?php echo $driver_id; ?>
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    console.error('Erreur:', data.error);
-                } else {
-                    console.log('Expédition arrêtée:', data.message);
-                }
-            })
-            .catch(error => {
-                console.error('Erreur:', error);
-            });
-        }
     </script>
 </body>
 </html>

@@ -61,6 +61,14 @@
  contracts         | freight_request_id      | integer                     | YES         | NO             | freight_requests   | id                  | NO
  contracts         | payment_status          | character varying           | YES         | NO             |                    |                     | NO
  contracts         | train_id                | integer                     | YES         | NO             | trains             | train_id            | NO
+ driver_positions  | position_id             | integer                     | NO          | YES            |                    |                     | NO
+ driver_positions  | driver_id               | integer                     | NO          | NO             | drivers            | driver_id           | NO
+ driver_positions  | driver_id               | integer                     | NO          | NO             | drivers            | driver_id           | NO
+ driver_positions  | latitude                | numeric                     | NO          | NO             |                    |                     | NO
+ driver_positions  | longitude               | numeric                     | NO          | NO             |                    |                     | NO
+ driver_positions  | speed                   | integer                     | NO          | NO             |                    |                     | NO
+ driver_positions  | train_type              | character varying           | YES         | NO             |                    |                     | NO
+ driver_positions  | timestamp               | timestamp with time zone    | NO          | NO             |                    |                     | NO
  drivers           | driver_id               | integer                     | NO          | YES            |                    |                     | NO
  drivers           | user_id                 | integer                     | NO          | NO             | users              | user_id             | YES
  drivers           | user_id                 | integer                     | NO          | NO             | users              | user_id             | YES
@@ -173,4 +181,167 @@
  wagons            | wagon_number            | character varying           | NO          | NO             |                    |                     | YES
  wagons            | status                  | character varying           | YES         | NO             |                    |                     | NO
  wagons            | current_location        | character varying           | YES         | NO             |                    |                     | NO
-(173 rows)
+(181 rows)
+
+              constraint_name               | constraint_type |    table_name     |     column_name     | foreign_table_name | foreign_column_name |                                                                                                                                                                                                                                                                                                                                                                                                      check_clause                                                                                                                                                                                                                                                                                                  
+--------------------------------------------+-----------------+-------------------+---------------------+--------------------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 2200_25213_1_not_null                      | CHECK           | admins            |                     |                    |                     | admin_id IS NOT NULL
+ 2200_25213_2_not_null                      | CHECK           | admins            |                     |                    |                     | user_id IS NOT NULL
+ admins_user_id_fkey                        | FOREIGN KEY     | admins            | user_id             | users              | user_id             |
+ fk_admin_user                              | FOREIGN KEY     | admins            | user_id             | users              | user_id             |
+ fk_user                                    | FOREIGN KEY     | admins            | user_id             | users              | user_id             |
+ admins_pkey                                | PRIMARY KEY     | admins            | admin_id            | admins             | admin_id            |
+ admins_user_id_key                         | UNIQUE          | admins            | user_id             | admins             | user_id             |
+ 2200_25228_1_not_null                      | CHECK           | agents            |                     |                    |                     | agent_id IS NOT NULL
+ 2200_25228_2_not_null                      | CHECK           | agents            |                     |                    |                     | user_id IS NOT NULL
+ agents_id_gare_fkey                        | FOREIGN KEY     | agents            | id_gare             | gares              | id_gare             |
+ agents_user_id_fkey                        | FOREIGN KEY     | agents            | user_id             | users              | user_id             |
+ fk_agent_gare                              | FOREIGN KEY     | agents            | id_gare             | gares              | id_gare             |
+ fk_agent_user                              | FOREIGN KEY     | agents            | user_id             | users              | user_id             |
+ fk_agents_user                             | FOREIGN KEY     | agents            | user_id             | users              | user_id             |
+ agents_pkey                                | PRIMARY KEY     | agents            | agent_id            | agents             | agent_id            |
+ agents_badge_number_key                    | UNIQUE          | agents            | badge_number        | agents             | badge_number        |
+ agents_user_id_key                         | UNIQUE          | agents            | user_id             | agents             | user_id             |
+ 2200_25244_1_not_null                      | CHECK           | clients           |                     |                    |                     | client_id IS NOT NULL
+ 2200_25244_2_not_null                      | CHECK           | clients           |                     |                    |                     | user_id IS NOT NULL
+ clients_user_id_fkey                       | FOREIGN KEY     | clients           | user_id             | users              | user_id             |
+ fk_client_user                             | FOREIGN KEY     | clients           | user_id             | users              | user_id             |
+ clients_pkey                               | PRIMARY KEY     | clients           | client_id           | clients            | client_id           |
+ clients_user_id_key                        | UNIQUE          | clients           | user_id             | clients            | user_id             |
+ unique_account_code                        | UNIQUE          | clients           | account_code        | clients            | account_code        |
+ 2200_25318_1_not_null                      | CHECK           | contracts         |                     |                    |                     | contract_id IS NOT NULL
+ contracts_payment_status_check             | CHECK           | contracts         |                     | contracts          | payment_status      | (((payment_status)::text = ANY ((ARRAY['unpaid'::character varying, 'partially_paid'::character varying, 'fully_paid'::character varying])::text[])))
+ non_negative_weight                        | CHECK           | contracts         |                     | contracts          | shipment_weight     | ((shipment_weight >= (0)::numeric))
+ valid_status                               | CHECK           | contracts         |                     | contracts          | status              | (((status)::text = ANY ((ARRAY['draft'::character varying, 'en_cours'::character varying, 'terminÚ'::character varying, 'annulÚ'::character varying, 'validÚ'::character varying])::text[])))
+ contracts_agent_id_fkey                    | FOREIGN KEY     | contracts         | agent_id            | agents             | agent_id            |
+ contracts_freight_request_id_fkey          | FOREIGN KEY     | contracts         | freight_request_id  | freight_requests   | id                  |
+ contracts_gare_destinataire_fkey           | FOREIGN KEY     | contracts         | gare_destinataire   | gares              | id_gare             |
+ contracts_gare_expÚditrice_fkey            | FOREIGN KEY     | contracts         | gare_expÚditrice    | gares              | id_gare             |
+ contracts_recipient_client_fkey            | FOREIGN KEY     | contracts         | recipient_client    | clients            | client_id           |
+ contracts_sender_client_fkey               | FOREIGN KEY     | contracts         | sender_client       | clients            | client_id           |
+ fk_agent                                   | FOREIGN KEY     | contracts         | agent_id            | agents             | agent_id            |
+ fk_contract_agent                          | FOREIGN KEY     | contracts         | agent_id            | agents             | agent_id            |
+ fk_contract_draft_creator                  | FOREIGN KEY     | contracts         | draft_created_by    | admins             | admin_id            |
+ fk_contract_gare_destinataire              | FOREIGN KEY     | contracts         | gare_destinataire   | gares              | id_gare             |
+ fk_contract_gare_expeditrice               | FOREIGN KEY     | contracts         | gare_expÚditrice    | gares              | id_gare             |
+ fk_contract_sender_client                  | FOREIGN KEY     | contracts         | sender_client       | clients            | client_id           |
+ fk_contracts_agent                         | FOREIGN KEY     | contracts         | agent_id            | agents             | agent_id            |
+ fk_contracts_trains                        | FOREIGN KEY     | contracts         | train_id            | trains             | train_id            |
+ fk_sender                                  | FOREIGN KEY     | contracts         | sender_client       | clients            | client_id           |
+ contracts_pkey                             | PRIMARY KEY     | contracts         | contract_id         | contracts          | contract_id         |
+ 2200_25809_1_not_null                      | CHECK           | driver_positions  |                     |                    |                     | position_id IS NOT NULL
+ 2200_25809_2_not_null                      | CHECK           | driver_positions  |                     |                    |                     | driver_id IS NOT NULL
+ 2200_25809_3_not_null                      | CHECK           | driver_positions  |                     |                    |                     | latitude IS NOT NULL
+ 2200_25809_4_not_null                      | CHECK           | driver_positions  |                     |                    |                     | longitude IS NOT NULL
+ 2200_25809_5_not_null                      | CHECK           | driver_positions  |                     |                    |                     | speed IS NOT NULL
+ 2200_25809_7_not_null                      | CHECK           | driver_positions  |                     |                    |                     | timestamp IS NOT NULL
+ driver_positions_driver_id_fkey            | FOREIGN KEY     | driver_positions  | driver_id           | drivers            | driver_id           |
+ fk_driver                                  | FOREIGN KEY     | driver_positions  | driver_id           | drivers            | driver_id           |
+ driver_positions_pkey                      | PRIMARY KEY     | driver_positions  | position_id         | driver_positions   | position_id         |
+ 2200_25259_1_not_null                      | CHECK           | drivers           |                     |                    |                     | driver_id IS NOT NULL
+ 2200_25259_2_not_null                      | CHECK           | drivers           |                     |                    |                     | user_id IS NOT NULL
+ drivers_user_id_fkey                       | FOREIGN KEY     | drivers           | user_id             | users              | user_id             |
+ fk_driver_user                             | FOREIGN KEY     | drivers           | user_id             | users              | user_id             |
+ drivers_pkey                               | PRIMARY KEY     | drivers           | driver_id           | drivers            | driver_id           |
+ drivers_license_number_key                 | UNIQUE          | drivers           | license_number      | drivers            | license_number      |
+ drivers_user_id_key                        | UNIQUE          | drivers           | user_id             | drivers            | user_id             |
+ 2200_25766_1_not_null                      | CHECK           | expeditions       |                     |                    |                     | expedition_id IS NOT NULL
+ 2200_25766_2_not_null                      | CHECK           | expeditions       |                     |                    |                     | contract_id IS NOT NULL
+ 2200_25766_3_not_null                      | CHECK           | expeditions       |                     |                    |                     | train_id IS NOT NULL
+ 2200_25766_4_not_null                      | CHECK           | expeditions       |                     |                    |                     | number_of_wagons IS NOT NULL
+ 2200_25766_5_not_null                      | CHECK           | expeditions       |                     |                    |                     | departure_station IS NOT NULL
+ 2200_25766_6_not_null                      | CHECK           | expeditions       |                     |                    |                     | arrival_station IS NOT NULL
+ expeditions_contract_id_fkey               | FOREIGN KEY     | expeditions       | contract_id         | contracts          | contract_id         |
+ expeditions_train_id_fkey                  | FOREIGN KEY     | expeditions       | train_id            | trains             | train_id            |
+ expeditions_pkey                           | PRIMARY KEY     | expeditions       | expedition_id       | expeditions        | expedition_id       |
+ 2200_25373_10_not_null                     | CHECK           | freight_requests  |                     |                    |                     | mode_paiement IS NOT NULL
+ 2200_25373_1_not_null                      | CHECK           | freight_requests  |                     |                    |                     | id IS NOT NULL
+ 2200_25373_2_not_null                      | CHECK           | freight_requests  |                     |                    |                     | sender_client_id IS NOT NULL
+ 2200_25373_3_not_null                      | CHECK           | freight_requests  |                     |                    |                     | recipient_name IS NOT NULL
+ 2200_25373_4_not_null                      | CHECK           | freight_requests  |                     |                    |                     | recipient_contact IS NOT NULL
+ 2200_25373_5_not_null                      | CHECK           | freight_requests  |                     |                    |                     | gare_depart IS NOT NULL
+ 2200_25373_6_not_null                      | CHECK           | freight_requests  |                     |                    |                     | gare_arrivee IS NOT NULL
+ 2200_25373_9_not_null                      | CHECK           | freight_requests  |                     |                    |                     | date_start IS NOT NULL
+ freight_requests_status_check              | CHECK           | freight_requests  |                     | freight_requests   | status              | (((status)::text = ANY ((ARRAY['pending'::character varying, 'accepted'::character varying, 'rejected'::character varying, 'client_confirmed'::character varying, 'client_rejected'::character varying, 'contract_created'::character varying, 'contract_completed'::character varying])::text[])))
+ fk_account_code                            | FOREIGN KEY     | freight_requests  | account_code        | clients            | account_code        |
+ fk_freight_arrivee_gare                    | FOREIGN KEY     | freight_requests  | gare_arrivee        | gares              | id_gare             |
+ fk_freight_depart_gare                     | FOREIGN KEY     | freight_requests  | gare_depart         | gares              | id_gare             |
+ fk_freight_merchandise                     | FOREIGN KEY     | freight_requests  | merchandise_id      | merchandise        | merchandise_id      |
+ fk_freight_recipient_client                | FOREIGN KEY     | freight_requests  | recipient_client_id | clients            | client_id           |
+ fk_freight_sender_client                   | FOREIGN KEY     | freight_requests  | sender_client_id    | clients            | client_id           |
+ fk_merchandise                             | FOREIGN KEY     | freight_requests  | merchandise_id      | merchandise        | merchandise_id      |
+ fk_sender_client                           | FOREIGN KEY     | freight_requests  | sender_client_id    | clients            | client_id           |
+ freight_requests_assigned_train_id_fkey    | FOREIGN KEY     | freight_requests  | assigned_train_id   | trains             | train_id            |
+ freight_requests_client_id_fkey            | FOREIGN KEY     | freight_requests  | sender_client_id    | clients            | client_id           |
+ freight_requests_gare_arrivee_fkey         | FOREIGN KEY     | freight_requests  | gare_arrivee        | gares              | id_gare             |
+ freight_requests_gare_depart_fkey          | FOREIGN KEY     | freight_requests  | gare_depart         | gares              | id_gare             |
+ freight_requests_recipient_client_id_fkey  | FOREIGN KEY     | freight_requests  | recipient_client_id | clients            | client_id           |
+ freight_requests_pkey                      | PRIMARY KEY     | freight_requests  | id                  | freight_requests   | id                  |
+ 2200_25288_1_not_null                      | CHECK           | gares             |                     |                    |                     | id_gare IS NOT NULL
+ 2200_25288_2_not_null                      | CHECK           | gares             |                     |                    |                     | code_gare IS NOT NULL
+ 2200_25288_3_not_null                      | CHECK           | gares             |                     |                    |                     | libelle IS NOT NULL
+ gares_statut_check                         | CHECK           | gares             |                     | gares              | statut              | (((statut)::text = ANY ((ARRAY['EN SERVICE'::character varying, 'FERMEE'::character varying])::text[])))
+ gares_type_gare_check                      | CHECK           | gares             |                     | gares              | type_gare           | (((type_gare)::text = ANY ((ARRAY['gare principale'::character varying, 'voie de port'::character varying, 'embranchement'::character varying, 'Gare ferroviaire'::character varying])::text[])))
+ gares_pkey                                 | PRIMARY KEY     | gares             | id_gare             | gares              | id_gare             |
+ gares_code_gare_key                        | UNIQUE          | gares             | code_gare           | gares              | code_gare           |
+ gares_libelle_key                          | UNIQUE          | gares             | libelle             | gares              | libelle             |
+ 2200_25435_1_not_null                      | CHECK           | merchandise       |                     |                    |                     | merchandise_id IS NOT NULL
+ 2200_25435_2_not_null                      | CHECK           | merchandise       |                     |                    |                     | code IS NOT NULL
+ 2200_25435_3_not_null                      | CHECK           | merchandise       |                     |                    |                     | description IS NOT NULL
+ merchandise_pkey                           | PRIMARY KEY     | merchandise       | merchandise_id      | merchandise        | merchandise_id      |
+ merchandise_code_key                       | UNIQUE          | merchandise       | code                | merchandise        | code                |
+ 2200_25356_1_not_null                      | CHECK           | notifications     |                     |                    |                     | id IS NOT NULL
+ 2200_25356_2_not_null                      | CHECK           | notifications     |                     |                    |                     | user_id IS NOT NULL
+ 2200_25356_3_not_null                      | CHECK           | notifications     |                     |                    |                     | type IS NOT NULL
+ 2200_25356_4_not_null                      | CHECK           | notifications     |                     |                    |                     | title IS NOT NULL
+ 2200_25356_5_not_null                      | CHECK           | notifications     |                     |                    |                     | message IS NOT NULL
+ 2200_25356_7_not_null                      | CHECK           | notifications     |                     |                    |                     | metadata IS NOT NULL
+ notifications_type_check                   | CHECK           | notifications     |                     | notifications      | type                | (((type)::text = ANY ((ARRAY['request_submitted'::character varying, 'request_approved'::character varying, 'request_rejected'::character varying, 'client_confirmed'::character varying, 'client_rejected'::character varying, 'draft_created'::character varying, 'contract_completed'::character varying, 'payment_received'::character varying, 'contract_draft'::character varying, 'demande_refusÚe'::character varying, 'nouvelle_demande'::character varying, 'confirmation_paiement'::character varying, 'confirmation_dÚpart'::character varying, 'confirmation_arrivage'::character varying, 'erreur_paiement'::character varying, 'info_service'::character varying, 'request_accepted'::character varying, 'confirmation_service'::character varying, 'new_contract_draft'::character varying])::text[])))
+ fk_notification_request                    | FOREIGN KEY     | notifications     | related_request_id  | freight_requests   | id                  |
+ fk_notification_user                       | FOREIGN KEY     | notifications     | user_id             | users              | user_id             |
+ notifications_related_request_id_fkey      | FOREIGN KEY     | notifications     | related_request_id  | freight_requests   | id                  |
+ notifications_user_id_fkey                 | FOREIGN KEY     | notifications     | user_id             | users              | user_id             |
+ notifications_pkey                         | PRIMARY KEY     | notifications     | id                  | notifications      | id                  |
+ 2200_25744_1_not_null                      | CHECK           | payments          |                     |                    |                     | payment_id IS NOT NULL
+ 2200_25744_4_not_null                      | CHECK           | payments          |                     |                    |                     | amount IS NOT NULL
+ payments_client_id_fkey                    | FOREIGN KEY     | payments          | client_id           | users              | user_id             |
+ payments_contract_id_fkey                  | FOREIGN KEY     | payments          | contract_id         | contracts          | contract_id         |
+ payments_pkey                              | PRIMARY KEY     | payments          | payment_id          | payments           | payment_id          |
+ payments_reference_number_key              | UNIQUE          | payments          | reference_number    | payments           | reference_number    |
+ 2200_25527_1_not_null                      | CHECK           | region_distances  |                     |                    |                     | id IS NOT NULL
+ 2200_25527_2_not_null                      | CHECK           | region_distances  |                     |                    |                     | from_region IS NOT NULL
+ 2200_25527_3_not_null                      | CHECK           | region_distances  |                     |                    |                     | to_region IS NOT NULL
+ 2200_25527_4_not_null                      | CHECK           | region_distances  |                     |                    |                     | estimated_distance_km IS NOT NULL
+ region_distances_pkey                      | PRIMARY KEY     | region_distances  | id                  | region_distances   | id                  |
+ region_distances_from_region_to_region_key | UNIQUE          | region_distances  | to_region           | region_distances   | to_region           |
+ region_distances_from_region_to_region_key | UNIQUE          | region_distances  | from_region         | region_distances   | to_region           |
+ region_distances_from_region_to_region_key | UNIQUE          | region_distances  | from_region         | region_distances   | from_region         |
+ region_distances_from_region_to_region_key | UNIQUE          | region_distances  | to_region           | region_distances   | from_region         |
+ 2200_25514_1_not_null                      | CHECK           | tariffs           |                     |                    |                     | tariff_id IS NOT NULL
+ 2200_25514_2_not_null                      | CHECK           | tariffs           |                     |                    |                     | client_id IS NOT NULL
+ 2200_25514_3_not_null                      | CHECK           | tariffs           |                     |                    |                     | base_rate_per_km IS NOT NULL
+ fk_tariff_client                           | FOREIGN KEY     | tariffs           | client_id           | clients            | client_id           |
+ tariffs_client_id_fkey                     | FOREIGN KEY     | tariffs           | client_id           | clients            | client_id           |
+ tariffs_pkey                               | PRIMARY KEY     | tariffs           | tariff_id           | tariffs            | tariff_id           |
+ 2200_25710_1_not_null                      | CHECK           | trains            |                     |                    |                     | train_id IS NOT NULL
+ 2200_25710_2_not_null                      | CHECK           | trains            |                     |                    |                     | train_number IS NOT NULL
+ trains_pkey                                | PRIMARY KEY     | trains            | train_id            | trains             | train_id            |
+ trains_train_number_key                    | UNIQUE          | trains            | train_number        | trains             | train_number        |
+ 2200_25199_1_not_null                      | CHECK           | users             |                     |                    |                     | user_id IS NOT NULL
+ 2200_25199_2_not_null                      | CHECK           | users             |                     |                    |                     | username IS NOT NULL
+ 2200_25199_3_not_null                      | CHECK           | users             |                     |                    |                     | password_hash IS NOT NULL
+ 2200_25199_4_not_null                      | CHECK           | users             |                     |                    |                     | email IS NOT NULL
+ 2200_25199_5_not_null                      | CHECK           | users             |                     |                    |                     | role IS NOT NULL
+ users_role_check                           | CHECK           | users             |                     | users              | role                | (((role)::text = ANY ((ARRAY['admin'::character varying, 'agent'::character varying, 'client'::character varying, 'driver'::character varying])::text[])))
+ users_pkey                                 | PRIMARY KEY     | users             | user_id             | users              | user_id             |
+ users_email_key                            | UNIQUE          | users             | email               | users              | email               |
+ users_username_key                         | UNIQUE          | users             | username            | users              | username            |
+ 2200_25720_1_not_null                      | CHECK           | wagon_assignments |                     |                    |                     | assignment_id IS NOT NULL
+ wagon_assignments_train_id_fkey            | FOREIGN KEY     | wagon_assignments | train_id            | trains             | train_id            |
+ wagon_assignments_wagon_id_fkey            | FOREIGN KEY     | wagon_assignments | wagon_id            | wagons             | wagon_id            |
+ wagon_assignments_pkey                     | PRIMARY KEY     | wagon_assignments | assignment_id       | wagon_assignments  | assignment_id       |
+ 2200_25700_1_not_null                      | CHECK           | wagons            |                     |                    |                     | wagon_id IS NOT NULL
+ 2200_25700_2_not_null                      | CHECK           | wagons            |                     |                    |                     | wagon_number IS NOT NULL
+ wagons_pkey                                | PRIMARY KEY     | wagons            | wagon_id            | wagons             | wagon_id            |
+ wagons_wagon_number_key                    | UNIQUE          | wagons            | wagon_number        | wagons             | wagon_number        |
+(159 rows)
